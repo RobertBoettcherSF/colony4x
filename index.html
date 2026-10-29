@@ -1,0 +1,33 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Colony4X v0.6</title><script>/* earliest feedback capture: runs before anything else */
+(function(){var now=new Date().toISOString(),prev=null;try{prev=JSON.parse(localStorage.getItem('c4x_session')||'null');}catch(e){}
+var cont=prev&&prev.lastActive&&(Date.now()-prev.lastActive<6*3600e3)&&prev.events;
+var L=window.COLLOG=cont?prev:{sessionStart:now,pageLoads:[],events:[],errors:[]};
+L.pageLoad=now;L.url=location.href;L.userAgent=navigator.userAgent;L.platform=navigator.platform;L.language=navigator.language;L.screen=screen.width+'x'+screen.height;L.viewport=innerWidth+'x'+innerHeight;L.storageOK=null;L.pageLoads=(L.pageLoads||[]).concat([now]);
+var pt=null;L.persist=function(now){clearTimeout(pt);var f=function(){try{L.lastActive=Date.now();localStorage.setItem('c4x_session',JSON.stringify(L));}catch(e){if(L.events.length>500){L.events.splice(0,Math.floor(L.events.length/3));}}};if(now)f();else pt=setTimeout(f,500);};
+window.addEventListener('pagehide',function(){L.persist(true);});window.addEventListener('beforeunload',function(){L.persist(true);});
+try{localStorage.setItem('_c4x','1');localStorage.removeItem('_c4x');L.storageOK=true;}catch(e){L.storageOK=String(e);}
+function push(o){o.ts=Date.now();try{o.turn=window.__c4xTurn;}catch(e){}L.events.push(o);L.persist();if(window.__c4xLive)window.__c4xLive();if(L.events.length>5000)L.events.splice(0,1000);}
+L.push=push;push({type:'pageLoad',continuedSession:!!cont});
+function desc(el){if(!el||!el.tagName)return'';var s=el.tagName.toLowerCase();if(el.id)s+='#'+el.id;for(var k in el.dataset)s+='['+k+'='+el.dataset[k]+']';var t=(el.textContent||'').trim().slice(0,40);if(t&&el.tagName!=='CANVAS'&&el.tagName!=='DIV')s+=' "'+t+'"';return s;}
+document.addEventListener('click',function(e){var el=e.target.closest?e.target.closest('button,a,[data-tech],[data-fk],input,select,canvas,#modal')||e.target:e.target;push({type:'click',button:e.button,target:desc(el),x:e.clientX,y:e.clientY,modalOpen:!!(document.getElementById('modal')&&!document.getElementById('modal').hidden)});},true);
+document.addEventListener('contextmenu',function(e){push({type:'rightclick',target:desc(e.target),x:e.clientX,y:e.clientY});},true);
+document.addEventListener('keydown',function(e){push({type:'key',key:e.key,code:e.code,target:desc(e.target),modalOpen:!!(document.getElementById('modal')&&!document.getElementById('modal').hidden)});},true);
+document.addEventListener('change',function(e){push({type:'change',target:desc(e.target),value:e.target.type==='file'?'(file)':e.target.type==='checkbox'?e.target.checked:e.target.value});},true);
+window.addEventListener('error',function(e){var o={type:'error',msg:String(e.message),src:(e.filename||'')+':'+e.lineno+':'+e.colno,stack:e.error&&e.error.stack};L.errors.push(o);push(o);},true);
+window.addEventListener('unhandledrejection',function(e){var o={type:'error',msg:'unhandled rejection: '+e.reason};L.errors.push(o);push(o);});
+window.addEventListener('load',function(){push({type:'windowLoaded'});});
+})();</script><link rel="stylesheet" href="style.css"></head><body>
+<div id="top">
+ <b>Colony4X</b> <span id="stat"></span>
+ <span class="sp"></span><span id="apbar" title="Autoplay speed (P = pause/resume)">Autoplay: <button id="sp0">⏸</button><button id="sp1">1x</button><button id="sp2">Fast</button><button id="sp3">Max</button> <label><input type="checkbox" id="followCb" checked>Follow</label> <label><input type="checkbox" id="revealCb">Reveal (V)</label> <button id="bCtl">Take control (C)</button></span>
+ <label title="Energy split: economy vs labs">Econ <input type="range" id="labs" min="0" max="100" step="10"> Labs <span id="labsv"></span></label>
+ <button id="bResearch">Research (T)</button><button id="bStats">Stats (G)</button><button id="bPolicy">Policy (Y)</button><button id="bDiplo">Diplomacy (D)</button><button id="bView" title="Toggle surface / underground view">View: Surface (U)</button>
+ <button id="bExport" class="hot" title="Downloads col-feedback.json – attach it to your message">Save feedback (F9)</button>
+ <label title="Auto-download a log every 10 turns"><input type="checkbox" id="autoDl">auto-download every 10 turns</label>
+ <button id="bSave">Save</button><button id="bLoad">Load</button><button id="bLoadLog">Load log…</button><input type="file" id="fileLog" accept=".json" hidden>
+ <button id="bNew">New</button><button id="bHelp">Help (?)</button>
+ <span id="liveInd" title="Live log: written to col-feedback.json after every action (run python3 play.py)">live log: off</span> <button id="bEnd" class="end">End turn ⏎</button>
+</div>
+<div id="main"><div id="mapwrap"><canvas id="map"></canvas></div><div id="side"><div id="sel"></div><h4>Events</h4><div id="feed"></div></div></div>
+<div id="toast" hidden></div><div id="modal" hidden><div id="mbox"></div></div>
+<script src="game.js"></script><script src="ui.js"></script></body></html>
