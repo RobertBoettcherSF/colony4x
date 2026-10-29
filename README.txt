@@ -1,4 +1,4 @@
-Colony4X v0.6
+Colony4X v0.7
 PLAY: double-click index.html (works offline in GNOME Web, Firefox, Chrome). Press ? in game for help.
 
 FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads col-feedback.json to Downloads.
@@ -6,6 +6,26 @@ FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads c
   dialogs, toasts, errors, every game action, autoplay speed / take-control / hand-back, turn summaries, stats,
   full game state. Uncaught errors download col-feedback.json automatically (max once a minute); game end once.
   Optional: python3 play.py serves the game on localhost and rewrites col-feedback.json here after every action.
+
+NEW IN v0.7 – full social policy
+ - Four policy axes, four choices each (the first is neutral):
+   Economy: Balanced Ledger / Open Exchange (+20% energy, -10% minerals, Reputation gains +25%) /
+     Directed Output (+15% minerals, -15% energy) / Symbiotic Charter (+1 nutrient per city, -10% minerals,
+     fungus relations +5)
+   Focus: Civic Balance / Inquiry Mandate (+20% labs, -10% minerals) / Vigilance Doctrine (+20% attack,
+     -15% labs) / Prosperity Pact (+1 nutrient per city, -10% labs)
+   Society: Civic Assembly / Merit Councils (research -12%, growth 10% slower) / Frontier Charter
+     (colonists -30%, growth 10% faster, +1 upkeep per 4 cities, -5% labs) / Martial Levy (military -10%,
+     Reputation gains -25%, double switch unrest)
+   Environment: Managed Land / Extractive Drive (+12% minerals, more Spore Beasts, fungus relations -12) /
+     Fungal Harmony (free fungus moves, beasts calmer, fungus relations +10, -10% minerals) /
+     Reclamation Corps (terraforming 35% faster, +1 energy per 3 cities, -5% energy, fungus relations -5)
+ - Policy screen (Y): all axes, current choices, switch cost, net one-line effect, rivals' policies.
+   Free until turn 20; after that each switch costs 20 + 3 credits per city and causes 3 turns of unrest
+   (-15% minerals and labs; shown in the top bar).
+ - AI picks by personality (Iron military, Lumen research, Drift expansion, Verdant eco/fungus) and
+   revises every 10 turns when behind, threatened, or near an ascension, economic or dominion win.
+ - Every change is logged (policyChanged with cost, unrest and reason); F9 logs have a policies block.
 
 NEW IN v0.6 – ships and navies
  - Hydrodynamic Hulls unlocks Coastal Docks (coastal cities), Scout Skiff, Troop Transport (carries 3) and
@@ -122,7 +142,7 @@ NEW IN v0.3
  - AI strategy: depth-3 minimax (alpha-beta) over an abstract economy model each turn (expand/econ/military/
    project/strike); AI buys and hurries projects; per-turn AI time logged in turn summaries (aiMs).
  - Anti-snowball: inefficiency per city, upkeep per city, research cost scales with empire size.
- - Social policy (Y): Economy and Focus axes, 30 credits to switch. Random events. ~40 original land + 12 sea
+ - Social policy (Y): four axes (see v0.7). Random events. ~40 original land + 12 sea
    city names per faction. Docs: docs/CONCEPTS.md (concepts we have + prioritised backlog).
 
 NEW IN v0.2

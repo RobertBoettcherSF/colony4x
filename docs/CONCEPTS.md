@@ -23,7 +23,7 @@ art from any existing game are used.
 | AI strategy | depth-3 minimax with alpha-beta over an abstract economy/military model choosing expand / build up / arm / project / strike; rivals strike whoever is closest to winning |
 
 ## Backlog (prioritised)
-1. **Social policy, full version (HIGH)** – four axes with real trade-offs and prerequisites:
+1. ~~**Social policy, full version (HIGH)**~~ – DONE in v0.7 (four axes × four choices, switch cost + brief unrest, AI by personality/situation; no favoured/forbidden choices or lookahead yet) – four axes with real trade-offs and prerequisites:
    - *Governance*: Assembly Rule (+growth, -defence when at war), Directorate (+minerals, -happiness), Steward Council (+efficiency), Free Congress (+labs, AI dislikes you).
    - *Economy*: Open Exchange, Directed Output, Symbiotic Charter (eco: + fungus yields, -mineral cap).
    - *Values*: Inquiry, Vigilance, Prosperity, Harmony (fewer unrest, slower growth).
