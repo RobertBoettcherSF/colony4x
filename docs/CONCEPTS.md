@@ -29,7 +29,7 @@ art from any existing game are used.
    - *Values*: Inquiry, Vigilance, Prosperity, Harmony (fewer unrest, slower growth).
    - *Future tier* unlocked by late techs (e.g. Cybernetic Union, Neural Commons).
    Each faction has a favoured and a forbidden choice; AI evaluates policies through the same lookahead model.
-2. **Unrest / morale of citizens (HIGH)** – content vs restless citizens, entertainment facilities, policy effects; also feeds difficulty (the classic "harder = more unrest" lever).
+2. ~~**Unrest / morale of citizens (HIGH)**~~ – DONE in v0.8 (content/restless/rioting, entertainment facilities, policy and difficulty pressure, riots, AI response) – content vs restless citizens, entertainment facilities, policy effects; also feeds difficulty (the classic "harder = more unrest" lever).
 3. **Diplomacy – DONE in v0.5** – war / ceasefire / peace / alliance, open borders, credits↔energy/minerals trade contracts, Reputation (honour raises it, betrayal drops it hard and locks out good deals), personality-driven deterministic AI offers, diplomatic victory (council leader at peace/allied with a majority) and cooperative victory (shared win with allies), both switchable on the rules screen. Not done: tribute, shared vision, an elected council vote.
 4. **Unit design workshop (MED)** – chassis + weapon + armour + ability → prototypes with a one-off extra cost.
 5. **Zone of control & disengage (MED)** – can't move between two enemy-adjacent tiles; fast units may retreat.

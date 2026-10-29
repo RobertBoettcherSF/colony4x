@@ -1,4 +1,4 @@
-Colony4X v0.7
+Colony4X v0.8
 PLAY: double-click index.html (works offline in GNOME Web, Firefox, Chrome). Press ? in game for help.
 
 FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads col-feedback.json to Downloads.
@@ -6,6 +6,22 @@ FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads c
   dialogs, toasts, errors, every game action, autoplay speed / take-control / hand-back, turn summaries, stats,
   full game state. Uncaught errors download col-feedback.json automatically (max once a minute); game end once.
   Optional: python3 play.py serves the game on localhost and rewrites col-feedback.json here after every action.
+
+NEW IN v0.8 – morale and unrest
+ - Every city is Content, Restless or Rioting. The city panel shows the morale value and every factor.
+   Up: base +3, Recreation Commons +2 (no tech), Dreamweave Theatre +3 (Signal Theory), Habitat Dome +1,
+     Civic Assembly +1, Prosperity Pact +1, Martial Levy garrisons (+1), harvests and supply pods.
+   Down: size (-0.4 per pop above 5), empire size (-0.25 per city above 6), nearby fungus (up to -2;
+     a bonus instead under Fungal Harmony or for the fungus-minded), war weariness from attackers lost
+     (up to -3; Martial Levy halves it, Vigilance Doctrine cuts it by 25%), policy-switch unrest (-2),
+     Frontier Charter and Extractive Drive (-1), famine, occupation and fungal blooms.
+ - Restless: growth -25%, production -10%. Rioting: no growth, production -40%, and half the turns
+   a riot idles worked tiles, loots a facility or raises Insurgents next to the city.
+ - Difficulty sets how demanding your citizens are: x0.6 (Cadet) up to x1.6 (Paragon) on all
+   negative factors.
+ - AI builds Recreation Commons/Theatres in unhappy cities and switches Society to Civic Assembly
+   (calm) or Martial Levy (harden) when many cities are unhappy.
+ - Logged: moraleShift, riot, aiCalm events; F9 logs have a morale block and a Morale summary line.
 
 NEW IN v0.7 – full social policy
  - Four policy axes, four choices each (the first is neutral):
