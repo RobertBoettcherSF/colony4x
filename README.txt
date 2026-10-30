@@ -1,4 +1,4 @@
-Colony4X v0.8
+Colony4X v0.9
 PLAY: double-click index.html (works offline in GNOME Web, Firefox, Chrome). Press ? in game for help.
 
 FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads col-feedback.json to Downloads.
@@ -6,6 +6,18 @@ FEEDBACK: F9 or the purple "Save feedback (F9)" button, at any time, downloads c
   dialogs, toasts, errors, every game action, autoplay speed / take-control / hand-back, turn summaries, stats,
   full game state. Uncaught errors download col-feedback.json automatically (max once a minute); game end once.
   Optional: python3 play.py serves the game on localhost and rewrites col-feedback.json here after every action.
+
+NEW IN v0.9 – true fog of war
+ - You see only what your units and cities see this turn: land units 2 tiles, fast units and ships 3, cities 3
+   (warrens 2); +1 on rocky or high ground; the new Sensor Lattice tech (after Signal Theory) adds +1 to everything.
+ - Unexplored tiles are black. Explored tiles out of sight are dimmed and show the terrain as you last saw it.
+ - Rival cities and units out of sight stay as dashed "last-seen" markers (size, owner, turn seen) until you look again;
+   the tile panel lists them. Rival details only update inside your vision.
+ - Rival AIs play by the same rules: targets, threats, war strength estimates and first contact use only their own
+   vision and memory. Walking into hidden enemies is logged as an encounter.
+ - Feedback log: new "fog" block (vision/explored/ghosts per faction, rediscoveries, stacks lost), a Fog: summary
+   line, stats fields, and events cityRediscovered / stackLostInFog / fogEncounter. Replays stay exact.
+ - The Reveal box (V) still shows the whole map.
 
 NEW IN v0.8 – morale and unrest
  - Every city is Content, Restless or Rioting. The city panel shows the morale value and every factor.

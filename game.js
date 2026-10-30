@@ -85,12 +85,13 @@ const EVENTS=[
  {k:'bloom',name:'Fungal bloom',run:(S,f,c)=>{moodEvent(S,c,f.pers==='eco'||policyMods(S,f.id).fsoothe?1:-1,8,'bloom');let n=0;for(const i of nbrs(S,c.at,3)){const t=S.tiles[i];if(t.land&&!t.f&&!t.imp&&!cityAt(S,i)&&rand(S)<0.3){t.f=true;n++;}}return 'Fungus blooms around '+c.name+' ('+n+' tiles)';}},
  {k:'surge',name:'Spore surge',run:(S,f,c)=>{const cand=nbrs(S,c.at,4).filter(i=>S.tiles[i].land&&dist(S,i,c.at)>=3&&!S.units.some(u=>u.at===i)&&!cityAt(S,i));if(!cand.length)return null;makeUnit(S,-1,'beast',cand[ri(S,cand.length)]);return 'A Spore Beast surges out of the wilds near '+c.name;}}];
 function randomEvents(S){if(!rule(S,'events')||S.turn<graceTurn(S))return;for(const f of S.factions){if(!f.alive)continue;if(rand(S)>=0.035)continue;const cs=S.cities.filter(c=>c.f===f.id&&!c.ug);if(!cs.length)continue;const c=cs[ri(S,cs.length)];const E=EVENTS[ri(S,EVENTS.length)];const msg=E.run(S,f,c);if(msg)logEv(S,'randomEvent',{f:f.id,event:E.name,city:c.name,at:c.at,msg});}}
-const VERSION='0.8';
+const VERSION='0.9';
 const TECHS={
  soil:{name:'Soil Lattice Genetics',pre:[],desc:'Unlocks Hydroponic Vats.'},
  deep:{name:'Deep Core Sampling',pre:[],desc:'Unlocks Fabricator.'},
  photon:{name:'Photonic Weave',pre:[],desc:'Terraformers can build Solar Collectors.'},
  kinetic:{name:'Kinetic Arms',pre:[],desc:'Unlocks Lancer (attack 4).'},
+ sensors:{name:'Sensor Lattice',pre:['signal'],desc:'+1 vision radius for every unit and city.'},
  signal:{name:'Signal Theory',pre:[],desc:'+10% research. Unlocks Dreamweave Theatre (+3 morale).'},
  lattice:{name:'Lattice Armor',pre:['deep'],desc:'Unlocks Warden (defence 3).'},
  field:{name:'Field Projection',pre:['lattice','photon'],desc:'Unlocks Perimeter Shield (city defence x2).'},
@@ -291,6 +292,7 @@ function step(S,u,to){ // returns string error or null
  u.fort=false;u.work=null;
  if(enemyAt(S,to,u.f)){
   if(UNITS[u.type].a<=0)return'Non-combat unit cannot attack';
+  if(u.f>=0&&!seesTile(S,u.f,to))logEv(S,'fogEncounter',{f:u.f,unit:UNITS[u.type].name,at:to});
   {const tc=cityAt(S,to);if(tc&&tc.ug&&tc.f!==u.f&&!(S.tiles[u.at].tun!=null&&S.tiles[u.at].tun>=0)&&UNITS[u.type].a<4&&!has(S,u.f,'sapper'))return'Underground base: attack from a tunnel tile or with an attack-4+ unit';}
   const d=bestDefender(S,to,u);
   if(d){const win=combat(S,u,d);u.mp=0;if(!win)return null;if(bestDefender(S,to,u))return null;}
@@ -331,7 +333,40 @@ function marchTo(S,u,to){ // long march using one shared reverse BFS per faction
  if(B.dist[u.at]<0){moveToward(S,u,to,60);return;}let c=B.prev[u.at];
  while(c>=0&&u.mp>0){if(enemyAt(S,c,u.f)&&c!==to)return;const at=u.at;const e=step(S,u,c);if(e||S.units.indexOf(u)<0||u.at===at)return;if(c===to)return;c=B.prev[c];}}
 /* ---------- visibility ---------- */
-function updateSeen(S,fid){const f=fac(S,fid);for(const u of S.units)if(u.f===fid){f.seen[u.at]=1;for(const n of nbrs(S,u.at,UNITS[u.type].mv>1?3:2))f.seen[n]=1;}for(const c of S.cities)if(c.f===fid)for(const n of nbrs(S,c.at,3))f.seen[n]=1;}
+// ---- v0.9 fog of war: current vision (f.vis), explored map (f.seen), last-seen memory (f.mem)
+function visRadius(S,u){const T=UNITS[u.type],t=S.tiles[u.at];let r=T.vis!=null?T.vis:(T.mv>1?3:2);
+ if(t.land&&!isShip(u)&&(t.r===2||t.e>=0.7))r++;
+ const c=cityAt(S,u.at);if((c&&c.ug)||(t.tun!=null&&t.tun>=0&&!c&&u.f===t.tun&&!t.road))r=Math.min(r,2);
+ if(u.f>=0&&has(S,u.f,'sensors'))r++;return r;}
+function cityVisR(S,c){return (c.ug?2:3)+(has(S,c.f,'sensors')?1:0);}
+function markVis(S,f,at,r){f.vis[at]=1;f.seen[at]=1;for(const n of nbrs(S,at,r)){f.vis[n]=1;f.seen[n]=1;}}
+function seesTile(S,fid,i){if(fid<0)return true;const f=fac(S,fid);return !f.vis||!!f.vis[i];}
+function knownOwner(S,fid,c){if(c.f===fid)return fid;const f=fac(S,fid);if(!f.vis||f.vis[c.at])return c.f;const m=f.mem&&f.mem.c[c.id];return m?m.f:undefined;}
+function knowsCityOf(S,fid,c,owner){return knownOwner(S,fid,c)===owner;}
+function memSnap(S,f,i){const t=S.tiles[i];if(!f.mt)f.mt={};f.mt[i]=(t.f?1:0)|(t.road?2:0)|((['farm','mine','solar','forest'].indexOf(t.imp)+1)<<2);}
+function knownMil(S,a,b){const f=fac(S,a);let m=0;const seenIds={};
+ for(const u of S.units)if(u.f===b&&!UNITS[u.type].civ&&(!f.vis||f.vis[u.at])){m+=(UNITS[u.type].a+UNITS[u.type].d)*u.hp/10;seenIds[u.id]=1;}
+ if(f.mem)for(const k in f.mem.u){const g=f.mem.u[k];if(g.f===b&&!seenIds[k]&&UNITS[g.type]&&!UNITS[g.type].civ)m+=(UNITS[g.type].a+UNITS[g.type].d)*0.9;}
+ let kc=0;for(const c of S.cities)if(c.f!==a&&knownOwner(S,a,c)===b)kc++;return m+kc*3;}
+function updateSeen(S,fid){const f=fac(S,fid);const N=S.W*S.H;
+ if(!f.mem)f.mem={c:{},u:{}};const prev=f.vis;f.vis=new Array(N).fill(0);
+ if(rule(S,'fullMap'))f.vis.fill(1);
+ else{for(const u of S.units)if(u.f===fid)markVis(S,f,u.at,visRadius(S,u));for(const c of S.cities)if(c.f===fid)markVis(S,f,c.at,cityVisR(S,c));}
+ const V=f.vis,T=S.turn,ft=st(S,fid);
+ for(const c of S.cities){if(c.f===fid||!V[c.at])continue;const m=f.mem.c[c.id];
+  if(m&&(T-m.t>=10||m.f!==c.f)){ft.rediscovered=(ft.rediscovered||0)+1;logEv(S,'cityRediscovered',{f:fid,city:c.name,owner:c.f,was:m.f,pop:c.pop,wasPop:m.pop,lastSeen:m.t,at:c.at});}
+  f.mem.c[c.id]={at:c.at,f:c.f,name:c.name,pop:c.pop,ug:c.ug?1:0,t:T};}
+ for(const k in f.mem.c){const m=f.mem.c[k];if(V[m.at]&&!S.cities.some(c=>c.id===+k))delete f.mem.c[k];}
+ const lost={};const live={};
+ for(const u of S.units){if(u.f===fid)continue;live[u.id]=u;if(V[u.at]&&!(u.on!=null&&false)){f.mem.u[u.id]={at:u.at,f:u.f,type:u.type,t:T};}}
+ for(const k in f.mem.u){const g=f.mem.u[k];const u=live[k];
+  if(g.t===T&&u&&V[u.at])continue;
+  if(V[g.at]){delete f.mem.u[k];continue;}
+  if(T-g.t>50){delete f.mem.u[k];continue;}
+  if(prev&&g.t===T-1&&!g.lost&&u&&!V[u.at]&&g.f>=0&&!UNITS[g.type].civ){g.lost=1;const key=g.f+':'+g.at;lost[key]=(lost[key]||0)+1;}}
+ for(const key in lost)if(lost[key]>=2){const [of,at]=key.split(':').map(Number);ft.stacksLost=(ft.stacksLost||0)+1;logEv(S,'stackLostInFog',{f:fid,of,n:lost[key],at});}
+ for(let i=0;i<N;i++)if(V[i])memSnap(S,f,i);}
+function revealAround(S,u){if(u.f<0)return;const f=fac(S,u.f);if(!f.vis)return;const r=visRadius(S,u);f.vis[u.at]=1;f.seen[u.at]=1;memSnap(S,f,u.at);for(const n of nbrs(S,u.at,r)){f.vis[n]=1;f.seen[n]=1;memSnap(S,f,n);}}
 
 /* ---------- player actions (logged; replayable) ---------- */
 function act(S,a){_S=S;
@@ -380,10 +415,10 @@ function doAct(S,a){
 function buyCost(c){const left=itemCost(c.queue[0],c)-c.prod;return Math.max(0,left*2+(c.prod===0?left:0));}
 
 /* ---------- AI ---------- */
-const PRIO={militant:['kinetic','deep','lattice','boring','photon','plasma','soil','tidal','naval','ordnance','sapper','field','gravitic','dread','signal','habitat','neural','quantum','myco','synth','ascend'],
- scholarly:['signal','neural','soil','photon','quantum','deep','habitat','boring','tidal','naval','myco','synth','ascend','lattice','field','kinetic','ordnance','plasma','sapper','gravitic','dread'],
- eco:['soil','signal','myco','photon','tidal','naval','deep','habitat','kinetic','ordnance','boring','neural','quantum','synth','ascend','lattice','field','plasma','sapper','gravitic','dread'],
- expansionist:['soil','deep','photon','tidal','naval','habitat','boring','signal','neural','kinetic','ordnance','lattice','myco','quantum','synth','ascend','field','plasma','sapper','gravitic','dread']};
+const PRIO={militant:['kinetic','deep','lattice','boring','sensors','photon','plasma','soil','tidal','naval','ordnance','sapper','field','gravitic','dread','signal','habitat','neural','quantum','myco','synth','ascend'],
+ scholarly:['signal','neural','sensors','soil','photon','quantum','deep','habitat','boring','tidal','naval','myco','synth','ascend','lattice','field','kinetic','ordnance','plasma','sapper','gravitic','dread'],
+ eco:['soil','signal','myco','photon','sensors','tidal','naval','deep','habitat','kinetic','ordnance','boring','neural','quantum','synth','ascend','lattice','field','plasma','sapper','gravitic','dread'],
+ expansionist:['soil','deep','photon','tidal','naval','habitat','boring','signal','sensors','neural','kinetic','ordnance','lattice','myco','quantum','synth','ascend','field','plasma','sapper','gravitic','dread']};
 function bestUnit(S,fid,kind){const ks=Object.keys(UNITS).filter(k=>canBuild(S,fid,k)&&!UNITS[k].civ&&!UNITS[k].ship&&k!=='scout');ks.sort((a,b)=>kind==='def'?UNITS[b].d-UNITS[a].d||UNITS[a].cost-UNITS[b].cost:UNITS[b].a-UNITS[a].a||UNITS[b].mv-UNITS[a].mv);return ks[0];}
 function aiCity(S,c){
  if(c.queue.length)return;const f=fac(S,c.f),fid=c.f;
@@ -416,14 +451,14 @@ function aiCity(S,c){
  if(cities.length<target+3&&c.pop>=3)return pick('colonist');
  pick(bestUnit(S,fid,rand(S)<0.5?'att':'def'));
 }
-function aiRush(S,u){const fid=u.f;let E=null,ed=99;for(const c of S.cities)if(c.f===fac(S,fid).warTarget){const d=dist(S,c.at,u.at);if(d<ed){ed=d;E=c;}}if(!E||ed>16)return false;
+function aiRush(S,u){const fid=u.f;let E=null,ed=99;for(const c of S.cities)if(c.f!==fid&&knowsCityOf(S,fid,c,fac(S,fid).warTarget)){const d=dist(S,c.at,u.at);if(d<ed){ed=d;E=c;}}if(!E||ed>16)return false;
  let T=-1,td=99;for(let i=0;i<S.tiles.length;i++){if(S.tiles[i].tun!==fid&&!(S.cities.some(c=>c.at===i&&c.f===fid)))continue;const d=dist(S,i,E.at);if(d<td){td=d;T=i;}}if(T<0||td<=1||td>14)return false;
  const B=bfs(S,T,fid,16,true);if(B.dist[E.at]<0)return false;let c=B.prev[E.at];let job=-1;const path=[];while(c>=0&&c!==T){path.push(c);c=B.prev[c];}
  for(let k=path.length-1;k>=0;k--){const i=path[k];if(S.tiles[i].tun!==fid&&S.tiles[i].land&&!cityAt(S,i)&&!(B.occ[i]&1)){job=i;break;}}if(job<0)return false;
  u.tgt=job;if(u.at!==job)moveToward(S,u,job,20);if(S.units.indexOf(u)>=0&&u.at===job&&u.mp>0&&S.tiles[job].tun!==fid){u.work={kind:'tunnel',left:S.tiles[job].r===2?3:2,rush:1};u.mp=0;}return true;}
 /* ---------- underground supply (air / food / power) ---------- */
 function isTunT(t){return t.tun!=null&&t.tun>=0;}
-function hostileNear(S,i,fid){for(const u of S.units)if(u.f>=0&&u.f!==fid&&atWar(S,fid,u.f)&&UNITS[u.type].a>0&&dist(S,u.at,i)<=1)return u;return null;}
+function hostileNear(S,i,fid){for(const u of S.units)if(u.f>=0&&u.f!==fid&&seesTile(S,fid,u.at)&&atWar(S,fid,u.f)&&UNITS[u.type].a>0&&dist(S,u.at,i)<=1)return u;return null;}
 function supplyMap(S,fid){ // 1 = tunnel/warren tile connected to a held surface entrance
  const N=S.W*S.H,m=new Uint8Array(N),q=[];const surf=S.cities.filter(c=>c.f===fid&&!c.ug);
  const host=new Uint8Array(N);for(const u of S.units)if(u.f>=0&&u.f!==fid&&UNITS[u.type].a>0){host[u.at]=1;for(const n of nbrs(S,u.at))host[n]=1;}
@@ -518,14 +553,14 @@ function aiUnit(S,u){
   u.fort=true;return;
  }
  if(T.a>0&&f.warTarget!=null&&S.turn>=graceTurn(S)){ // siege enemy warrens: cut entrances, flood tunnels
-  let W=null,wd=99;for(const o of S.cities)if(o.ug&&o.f===f.warTarget){const d=dist(S,o.at,u.at);if(d<wd){wd=d;W=o;}}
+  let W=null,wd=99;for(const o of S.cities)if(o.ug&&o.f!==fid&&knowsCityOf(S,fid,o,f.warTarget)){const d=dist(S,o.at,u.at);if(d<wd){wd=d;W=o;}}
   if(W&&wd<=12){
    const fl=nbrs(S,u.at).find(n=>S.tiles[n].tun===W.f&&canFlood(S,fid,n)&&dist(S,n,W.at)<=3);if(fl!=null&&u.mp>0&&rand(S)<0.5){floodTunnel(S,u,fl);return;}
    if(wd===1){const canHit=has(S,fid,'sapper')||T.a>=4||isTunT(S.tiles[u.at]);const d0=bestDefender(S,W.at,u);if(canHit&&(!d0||attStrength(S,u)>defStrength(S,d0,u)*1.1)){step(S,u,W.at);return;}u.fort=true;return;}
    if(u.id%3===0){let tg=-1,td=99;for(const n of nbrs(S,W.at)){if(!S.tiles[n].land||cityAt(S,n)||S.units.some(x=>x.at===n&&x.f!==fid))continue;const d=dist(S,n,u.at);if(d<td){td=d;tg=n;}}if(tg>=0){moveToward(S,u,tg,16);return;}}}}
  const aggressive=(S.turn>=graceTurn(S)||rule(S,'aggressive'))&&(rule(S,'aggressive')||f.pers==='militant'||S.turn>40)||u.type==='scout'||f.plan==='strike'||f.plan==='military';
  const B=bfs(S,u.at,fid,u.type==='scout'?8:16);let best=-1,bs=-1e9;
- const cmap=new Map();for(const c of S.cities)if(!cmap.has(c.at))cmap.set(c.at,c);const em=new Map();for(const x of S.units)if(x.f!==fid){const a=em.get(x.at);if(a)a.push(x);else em.set(x.at,[x]);}
+ const cmap=new Map();for(const c of S.cities)if(!cmap.has(c.at)&&(c.f===fid||knownOwner(S,fid,c)!==undefined))cmap.set(c.at,c);const em=new Map();for(const x of S.units)if(x.f!==fid&&seesTile(S,fid,x.at)){const a=em.get(x.at);if(a)a.push(x);else em.set(x.at,[x]);}
  const myC=S.cities.filter(o=>o.f===fid),gt=graceTurn(S),agR=rule(S,'aggressive'),aS=attStrength(S,u);
  for(let i=0;i<B.dist.length;i++){if(B.dist[i]<0)continue;if(!(B.occ[i]&1))continue;
   const ec=cmap.get(i)||null;{const ow=ec?ec.f:(em.get(i)||[{f:fid}])[0].f;if(ow===fid||!atWar(S,fid,ow))continue;}
@@ -535,8 +570,8 @@ function aiUnit(S,u){
   const arr=em.get(i);let d=null,dv=-1;if(arr)for(const x of arr){const v=defStrength(S,x,u);if(v>dv){dv=v;d=x;}}
   let s=(ec?15:5)-B.dist[i]*1.5;if(f.warTarget!=null&&(ec?ec.f:(arr?arr[0]:{}).f)===f.warTarget)s+=12;if(f.warCity===i)s+=30;if(d){s+=(aS-dv)*4;if(u.type==='scout'&&d.f>=0)s-=20;}if(s>bs){bs=s;best=i;}}
  if(best>=0&&bs>-15&&T.a>0){moveToward(S,u,best,16,u.type==='scout'?null:B);return;}
- if((f.plan==='strike'||f.plan==='military')&&f.warTarget!=null&&T.a>0&&(f.pers==='militant'||f.pers==='expansionist')){const M=mapInfo(S),ec=S.cities.filter(c=>c.f===f.warTarget);if(ec.length&&ec.every(c=>M.lm[c.at]!==M.lm[u.at])&&(u.wantShip||S.units.filter(x=>x.f===fid&&x.wantShip&&!UNITS[x.type].civ).length<3)&&(hasDocks(S,fid)||S.units.some(x=>x.f===fid&&x.type==='transport'))){if(waitForShip(S,u))return;}else u.wantShip=false;}
- if(f.plan==='strike'&&f.warTarget!=null&&T.a>0){let tc=f.warCity>=0?f.warCity:-1;if(tc<0){let bd=1e9;for(const c of S.cities)if(c.f===f.warTarget){const d=dist(S,c.at,u.at);if(d<bd){bd=d;tc=c.at;}}}if(tc>=0){marchTo(S,u,tc);return;}}
+ if((f.plan==='strike'||f.plan==='military')&&f.warTarget!=null&&T.a>0&&(f.pers==='militant'||f.pers==='expansionist')){const M=mapInfo(S),ec=S.cities.filter(c=>c.f!==fid&&knowsCityOf(S,fid,c,f.warTarget));if(ec.length&&ec.every(c=>M.lm[c.at]!==M.lm[u.at])&&(u.wantShip||S.units.filter(x=>x.f===fid&&x.wantShip&&!UNITS[x.type].civ).length<3)&&(hasDocks(S,fid)||S.units.some(x=>x.f===fid&&x.type==='transport'))){if(waitForShip(S,u))return;}else u.wantShip=false;}
+ if(f.plan==='strike'&&f.warTarget!=null&&T.a>0){let tc=f.warCity>=0?f.warCity:-1;if(tc<0){let bd=1e9;for(const c of S.cities)if(c.f!==fid&&knowsCityOf(S,fid,c,f.warTarget)){const d=dist(S,c.at,u.at);if(d<bd){bd=d;tc=c.at;}}}if(tc>=0){marchTo(S,u,tc);return;}}
  if(u.type==='scout'||(!aggressive&&ri(S,3)===0)){ // explore
   if(u.tgt<0||u.at===u.tgt||f.seen[u.tgt]){let c2=-1;for(let k=0;k<30;k++){const i=ri(S,S.tiles.length);if(S.tiles[i].land&&!f.seen[i]){c2=i;break;}}if(c2<0)c2=ri(S,S.tiles.length);u.tgt=S.tiles[c2].land?c2:-1;}
   if(u.tgt>=0)moveToward(S,u,u.tgt,40);return;
@@ -581,13 +616,13 @@ function planFaction(S,fid){const f=fac(S,fid);const rivals=S.factions.filter(x=
  if(plan==='strike'&&S.turn<graceTurn(S)&&!S.ascension)plan='military';
  if(S.ascension&&S.ascension.f!==fid&&me.mil>0)plan='strike';
  if(plan==='strike'&&!atWar(S,fid,opp.id)){if(aiWantsBreak(S,fid,opp.id))declareWar(S,fid,opp.id,'strike planned');else{const ws=rivals.filter(x=>atWar(S,fid,x.id));let o2=null,v2=-1;for(const r of ws){const v=victoryProgress(S,r.id)*100+score(S,r.id)*0.2;if(v>v2){v2=v;o2=r;}}if(o2)opp=o2;else plan='military';}}
- if(plan==='strike'){f.warTarget=opp.id;const ac=S.ascension&&S.ascension.f===opp.id?S.cities.find(c=>c.id===S.ascension.city):S.cities.find(c=>c.f===opp.id&&c.queue[0]==='array')||null;f.warCity=ac?ac.at:-1;}else{f.warTarget=null;f.warCity=-1;}
+ if(plan==='strike'){f.warTarget=opp.id;const ac=S.ascension&&S.ascension.f===opp.id?S.cities.find(c=>c.id===S.ascension.city):S.cities.find(c=>c.f===opp.id&&c.queue[0]==='array'&&knownOwner(S,fid,c)===opp.id)||null;f.warCity=ac?ac.at:-1;}else{f.warTarget=null;f.warCity=-1;}
  if(plan!==f.plan)logEv(S,'aiPlan',{f:fid,plan,prev:f.plan||null,vs:opp.id,value:Math.round(res.v),nodes:ctr.n});
  f.plan=plan;}
 function aiPolicyWant(S,fid){const f=fac(S,fid),p=f.pers,w=Object.assign({},AI_POLICY[p]),why={};const cs=S.cities.filter(c=>c.f===fid),nc=cs.length;
  const sc=S.factions.filter(x=>x.alive).map(x=>score(S,x.id)),me=score(S,fid),top=Math.max(...sc),behind=S.turn>=60&&me<top*0.7;
  const tr=territory(S);let land=0,mine=0;for(let i=0;i<tr.length;i++)if(S.tiles[i].land){land++;if(tr[i]===fid)mine++;}const dom=land?mine/land:0;
- const threat=S.units.some(u=>u.f>=0&&u.f!==fid&&atWar(S,fid,u.f)&&!UNITS[u.type].civ&&UNITS[u.type].a>0&&cs.some(c=>dist(S,c.at,u.at)<=3));
+ const threat=S.units.some(u=>u.f>=0&&u.f!==fid&&seesTile(S,fid,u.at)&&atWar(S,fid,u.f)&&!UNITS[u.type].civ&&UNITS[u.type].a>0&&cs.some(c=>dist(S,c.at,u.at)<=3));
  const freeSites=S.turn%5===0||f._fs==null?(f._fs=nc<{expansionist:12,militant:9,eco:9,scholarly:9}[p]?1:0):f._fs;
  // situation overrides
  if(has(S,fid,'ascend')&&rule(S,'ascension')!==false&&cs.some(c=>c.fac.indexOf('beacon')>=0||c.queue.includes('beacon')||c.queue.includes('array'))){w.econ='directed';why.econ='ascension project';if(p!=='militant'){w.focus='inquiry';}}
@@ -605,7 +640,7 @@ function aiPolicy(S,fid){const f=fac(S,fid);if(S.turn<15)return;
  const {w,why}=aiPolicyWant(S,fid);f.polT=f.polT||{};
  for(const ax of POLICY_AXES){const cur=polOf(S,fid,ax);if(w[ax]===cur)continue;if(S.turn-(f.polT[ax]||0)<(why[ax]?25:45))continue;if(f.credits<switchCost(S,fid)+40)return;
   setPolicy(S,fid,ax,w[ax],why[ax]||'back to '+f.pers+' default');return;}}
-function runAI(S,fid){aiDiplomacy(S,fid);planFaction(S,fid);aiPolicy(S,fid);
+function runAI(S,fid){updateSeen(S,fid);aiDiplomacy(S,fid);planFaction(S,fid);aiPolicy(S,fid);
  const f=fac(S,fid);
  if(!f.research){const av=availTechs(S,fid);if(av.length){const sea=needSea(S,fid)?['soil','tidal','naval','ordnance'].filter(k=>av.indexOf(k)>=0):[];f.research=sea[0]||PRIO[f.pers].find(k=>av.indexOf(k)>=0)||av[0];if(sea.length)logEv(S,'aiNavalResearch',{f:fid,tech:TECHS[sea[0]].name});}}
  f.labs=f.pers==='scholarly'?0.7:f.pers==='militant'?0.4:0.5;
@@ -665,7 +700,7 @@ function validDeal(S,o){const D=dip(S),a=o.from,b=o.to;if(a===b||!S.factions[b]|
   if(D.contracts.some(c=>(c.seller===a&&c.buyer===b)||(c.seller===b&&c.buyer===a)))return'A trade contract is already running';const buyer=o.buy?a:b;if(fac(S,buyer).credits<o.price)return S.factions[buyer].name+' lacks '+o.price+' credits';return null;}}
  return'Unknown deal';}
 function resValue(S,fid,res){const p=fac(S,fid).pers;return res==='energy'?(p==='scholarly'?2.2:p==='expansionist'?1.3:1.5):(p==='militant'?1.9:1.5);}
-function strength(S,a,b){return (milPower(S,a)+5)/(milPower(S,b)+5);}
+function strength(S,a,b){return (milPower(S,a)+5)/(knownMil(S,a,b)+5);}
 function fungusFriendly(S,fid){const s=st(S,fid);return (fac(S,fid).pers==='eco'?20:Math.max(-10,10-(s.fungusCleared||0)))+policyMods(S,fid).fungRel;}
 // deterministic AI evaluation of an offer made to `me`
 function aiConsider(S,me,o){const D=dip(S),other=o.from,p=fac(S,me).pers,rep=D.rep[other],lk=locked(S,other),sr=strength(S,me,other),losing=sr<0.7;let prox=victoryProgress(S,other);if(rule(S,'economic')&&fac(S,other).credits>=econTarget(S)*(p==='eco'?0.55:0.35))prox=Math.max(prox,0.65);
@@ -730,8 +765,8 @@ function aiWantsBreak(S,fid,opp){const D=dip(S),r=D.rel[fid][opp],p=fac(S,fid).p
 function diploTurn(S){const D=dip(S);const fs=S.factions;
  // contact
  for(const a of fs){if(!a.alive)continue;for(const b of fs){if(b.id<=a.id||!b.alive||D.contact[a.id][b.id])continue;let seen=false;
-  for(const c of S.cities)if((c.f===b.id&&a.seen[c.at])||(c.f===a.id&&b.seen[c.at])){seen=true;break;}
-  if(!seen)for(const u of S.units)if((u.f===b.id&&a.seen[u.at])||(u.f===a.id&&b.seen[u.at])){seen=true;break;}
+  for(const c of S.cities)if((c.f===b.id&&a.vis&&a.vis[c.at])||(c.f===a.id&&b.vis&&b.vis[c.at])){seen=true;break;}
+  if(!seen)for(const u of S.units)if((u.f===b.id&&a.vis&&a.vis[u.at])||(u.f===a.id&&b.vis&&b.vis[u.at])){seen=true;break;}
   if(seen){D.contact[a.id][b.id]=D.contact[b.id][a.id]=1;logEv(S,'contact',{a:a.id,b:b.id});}}}
  // ceasefires lapse
  for(const a of fs)for(const b of fs)if(a.id<b.id&&D.rel[a.id][b.id]==='ceasefire'&&S.turn-D.since[a.id][b.id]>=DIPLO.CEASE_TURNS)setRel(S,a.id,b.id,'war','ceasefire expired');
@@ -769,7 +804,7 @@ function mapInfo(S){let m=_mi&&_mi.get(S.tiles);if(m)return m;const N=S.W*S.H,lm
  m={lm,ld,size,big:size.filter(s=>s>=30).length};if(_mi)_mi.set(S.tiles,m);return m;}
 function seaReach(S,fid){return hasDocks(S,fid)?3:1;}
 function board(S,u,tr){u.on=tr.id;u.at=tr.at;u.mp=0;u.fort=false;u.work=null;u.goto=-1;u.wantShip=false;logEv(S,'boarded',{f:u.f,unit:UNITS[u.type].name,ship:UNITS[tr.type].name,at:tr.at});}
-function afterMove(S,u,from,to){const t=S.tiles[to];
+function afterMove(S,u,from,to){const t=S.tiles[to];revealAround(S,u);
  if(isShip(u)){for(const x of S.units)if(x.on===u.id)x.at=to;return;}
  if(u.on!=null&&(t.land||cityAt(S,to))){const sea=!S.tiles[from].land&&!cityAt(S,from);u.on=null;if(sea){u.mp=0;if(u.f>=0){st(S,u.f).landings=(st(S,u.f).landings||0)+1;}logEv(S,'landing',{f:u.f,unit:UNITS[u.type].name,at:to});}}
  else if(u.on!=null&&!t.land)u.on=null;}
@@ -818,11 +853,11 @@ function aiShip(S,u){const fid=u.f,f=fac(S,fid),T=UNITS[u.type];const B=bfs(S,u.
  if(T.cap){aiTransport(S,u,B,home);return;}
  if(u.hp<=4){const h=home();if(h>=0&&h!==u.at)moveToward(S,u,h,40,B);else u.fort=true;return;}
  if(T.a>0){let best=-1,bs=-1e9;const aS=attStrength(S,u);
-  for(const x of S.units){if(x.f===fid||x.f<0||!isShip(x)||!atWar(S,fid,x.f)||S.tiles[x.at].land||cityAt(S,x.at))continue;const d=B.dist[x.at];if(d<0||d>T.mv*2)continue;const dv=defStrength(S,x,u);const s=(aS-dv)*4-d*2+(UNITS[x.type].cap?8:0);if(s>bs){bs=s;best=x.at;}}
+  for(const x of S.units){if(x.f===fid||x.f<0||!isShip(x)||!seesTile(S,fid,x.at)||!atWar(S,fid,x.f)||S.tiles[x.at].land||cityAt(S,x.at))continue;const d=B.dist[x.at];if(d<0||d>T.mv*2)continue;const dv=defStrength(S,x,u);const s=(aS-dv)*4-d*2+(UNITS[x.type].cap?8:0);if(s>bs){bs=s;best=x.at;}}
   if(best>=0&&bs>-4){moveToward(S,u,best,40,B);return;}}
  if(T.bomb){const tryB=()=>{if(S.units.indexOf(u)<0||u.mp<=0||u.hp<5)return false;const ts=bombardTargets(S,u);if(!ts.length)return false;bombard(S,u,ts[0]);return true;};if(tryB())return;
   const aggr=f.pers==='militant'||f.pers==='expansionist'||f.plan==='strike'||f.plan==='military';
-  if(aggr){let best=-1,bd=1e9;for(const c of S.cities){if(c.f===fid||!atWar(S,fid,c.f))continue;for(const n of nbrs(S,c.at)){if(B.dist[n]<0||S.tiles[n].land||cityAt(S,n))continue;const v=B.dist[n]-(c.f===f.warTarget?8:0)+(c.ug?3:0);if(v<bd&&B.dist[n]<=30){bd=v;best=n;}}}
+  if(aggr){let best=-1,bd=1e9;for(const c of S.cities){if(c.f===fid||!atWar(S,fid,c.f)||knownOwner(S,fid,c)!==c.f)continue;for(const n of nbrs(S,c.at)){if(B.dist[n]<0||S.tiles[n].land||cityAt(S,n))continue;const v=B.dist[n]-(c.f===f.warTarget?8:0)+(c.ug?3:0);if(v<bd&&B.dist[n]<=30){bd=v;best=n;}}}
    if(best>=0){moveToward(S,u,best,40,B);tryB();return;}}
   // guard: Verdant and everyone else keep warships off their own coast
   const mine=S.cities.filter(c=>c.f===fid&&coastal(S,c));if(mine.length){let wc=null,wv=1e9;for(const c of mine){const g=S.units.filter(x=>x.f===fid&&UNITS[x.type].bomb&&dist(S,x.at,c.at)<=2&&x!==u).length;const v=g*20+dist(S,c.at,u.at);if(v<wv){wv=v;wc=c;}}
@@ -836,7 +871,7 @@ function loadWaiters(S,u){const cap=UNITS[u.type].cap;let cg=cargoOf(S,u);for(co
 function pickDest(S,u,cg){const fid=u.f,f=fac(S,fid),M=mapInfo(S);const om=u.orig!=null?M.lm[u.orig]:-2;
  const civ=cg.some(x=>UNITS[x.type].found);let best=-1,bs=-1e9;
  if(civ){for(let i=0;i<S.tiles.length;i++){const t=S.tiles[i];if(!t.land||t.f||M.lm[i]===om||dist(S,i,u.at)>28)continue;if(!nbrs(S,i,2).some(n=>!S.tiles[n].land))continue;const s=siteScore(S,i,fid);if(s<0)continue;const v=s-dist(S,i,u.at)*0.6;if(v>bs){bs=v;best=i;}}return best;}
- for(const c of S.cities){if(c.f===fid||!atWar(S,fid,c.f)||M.lm[c.at]===om)continue;if(!nbrs(S,c.at,2).some(n=>!S.tiles[n].land))continue;const v=-dist(S,c.at,u.at)+(c.f===f.warTarget?12:0)-c.pop;if(v>bs){bs=v;best=c.at;}}return best;}
+ for(const c of S.cities){if(c.f===fid||!atWar(S,fid,c.f)||knownOwner(S,fid,c)!==c.f||M.lm[c.at]===om)continue;if(!nbrs(S,c.at,2).some(n=>!S.tiles[n].land))continue;const v=-dist(S,c.at,u.at)+(c.f===f.warTarget?12:0)-c.pop;if(v>bs){bs=v;best=c.at;}}return best;}
 function landingSpot(S,u,dest,B){const M=mapInfo(S);let best=-1,bv=1e9;for(let i=0;i<B.dist.length;i++){if(B.dist[i]<0||S.tiles[i].land||cityAt(S,i))continue;if(dist(S,i,dest)>6)continue;
   for(const j of nbrs(S,i)){if(!S.tiles[j].land||M.lm[j]!==M.lm[dest]||cityAt(S,j)||S.units.some(x=>x.at===j&&x.f!==u.f))continue;const v=B.dist[i]+dist(S,j,dest)*2;if(v<bv){bv=v;best=i;}}}return best;}
 function unload(S,u,cg,dest){let n=0;for(const x of cg){if(S.units.indexOf(x)<0)continue;x.mp=UNITS[x.type].mv*3;const opts=nbrs(S,u.at).filter(j=>S.tiles[j].land&&!cityAt(S,j)&&!S.units.some(y=>y.at===j&&y.f!==u.f)&&treatyAt(S,j,u.f)==null).sort((a,b)=>dist(S,a,dest)-dist(S,b,dest)||a-b);if(!opts.length)continue;if(!step(S,x,opts[0])&&x.on==null){n++;x.tgt=-1;}}
@@ -954,7 +989,7 @@ function newGame(o){
  logEv(S,'gameStart',{seed:S.seed,version:VERSION,difficulty:diff(S).name,rules:Object.assign({},DEFAULT_RULES,o.rules||{}),factions:S.factions.map(f=>f.name+(f.ai?' (AI, '+f.pers+')':' (player)'))});
  return S;
 }
-function statsTable(S){return S.factions.map(f=>{const s=f.stats||{};const cs=S.cities.filter(c=>c.f===f.id);return{riots:s.riots||0,riotIdle:s.riotIdle||0,riotSold:s.riotSold||0,rebels:s.rebels||0,moraleShifts:s.moraleShifts||0,unhappyTurns:s.unhappyTurns||0,unhappyNow:cs.filter(c=>c.mood&&c.mood!=='content').length,warWeariness:f.ww||0,policyChanges:s.policyChanges||0,policy:POLICY_AXES.map(ax=>polOf(S,f.id,ax)).join('/'),f:f.id,name:f.name,pers:f.pers,alive:f.alive,ai:f.ai,cities:cs.length,pop:cs.reduce((a,c)=>a+c.pop,0),techs:f.techs.length,units:S.units.filter(u=>u.f===f.id).length,built:s.built||0,lost:s.lost||0,warrens:cs.filter(c=>c.ug).length,warrensFounded:s.warrens||0,tunnels:S.tiles.filter(t=>t.tun===f.id).length,rushTiles:s.rushTiles||0,sieges:s.sieges||0,cutOff:s.cutOff||0,collapses:s.collapses||0,floods:s.floods||0,surrenders:s.surrenders||0,breaches:s.breaches||0,ugCapital:s.ugCapital||0,rep:S.dip?S.dip.rep[f.id]:50,repLabel:repLabel(S.dip?S.dip.rep[f.id]:50),relations:S.dip?S.factions.filter(o=>o.id!==f.id).map(o=>o.name+':'+S.dip.rel[f.id][o.id]+(S.dip.ob[f.id][o.id]?'+ob':'')).join(' '):'',betrayals:s.betrayals||0,treaties:s.treaties||0,alliances:s.alliances||0,trades:s.trades||0,offersMade:s.offersMade||0,offersAccepted:s.offersAccepted||0,peaceTurns:s.peaceTurns||0,allyTurns:s.allyTurns||0,ships:S.units.filter(u=>u.f===f.id&&isShip(u)).length,shipsBuilt:s.shipsBuilt||0,shipsLost:s.shipsLost||0,shipsSunk:s.shipsSunk||0,landings:s.landings||0,bombards:s.bombards||0,tradeRuns:s.tradeRuns||0,tradeCredits:s.tradeCredits||0,seaCities:cs.filter(c=>c.sea).length,docks:cs.filter(c=>c.fac.indexOf('docks')>=0).length,kills:s.kills||0,founded:s.founded||0,score:score(S,f.id)};});}
+function statsTable(S){return S.factions.map(f=>{const s=f.stats||{};const cs=S.cities.filter(c=>c.f===f.id);return{rediscovered:s.rediscovered||0,stacksLost:s.stacksLost||0,visTiles:(f.vis||[]).reduce((a,b)=>a+b,0),explored:(f.seen||[]).reduce((a,b)=>a+b,0),ghosts:f.mem?Object.keys(f.mem.u).length:0,riots:s.riots||0,riotIdle:s.riotIdle||0,riotSold:s.riotSold||0,rebels:s.rebels||0,moraleShifts:s.moraleShifts||0,unhappyTurns:s.unhappyTurns||0,unhappyNow:cs.filter(c=>c.mood&&c.mood!=='content').length,warWeariness:f.ww||0,policyChanges:s.policyChanges||0,policy:POLICY_AXES.map(ax=>polOf(S,f.id,ax)).join('/'),f:f.id,name:f.name,pers:f.pers,alive:f.alive,ai:f.ai,cities:cs.length,pop:cs.reduce((a,c)=>a+c.pop,0),techs:f.techs.length,units:S.units.filter(u=>u.f===f.id).length,built:s.built||0,lost:s.lost||0,warrens:cs.filter(c=>c.ug).length,warrensFounded:s.warrens||0,tunnels:S.tiles.filter(t=>t.tun===f.id).length,rushTiles:s.rushTiles||0,sieges:s.sieges||0,cutOff:s.cutOff||0,collapses:s.collapses||0,floods:s.floods||0,surrenders:s.surrenders||0,breaches:s.breaches||0,ugCapital:s.ugCapital||0,rep:S.dip?S.dip.rep[f.id]:50,repLabel:repLabel(S.dip?S.dip.rep[f.id]:50),relations:S.dip?S.factions.filter(o=>o.id!==f.id).map(o=>o.name+':'+S.dip.rel[f.id][o.id]+(S.dip.ob[f.id][o.id]?'+ob':'')).join(' '):'',betrayals:s.betrayals||0,treaties:s.treaties||0,alliances:s.alliances||0,trades:s.trades||0,offersMade:s.offersMade||0,offersAccepted:s.offersAccepted||0,peaceTurns:s.peaceTurns||0,allyTurns:s.allyTurns||0,ships:S.units.filter(u=>u.f===f.id&&isShip(u)).length,shipsBuilt:s.shipsBuilt||0,shipsLost:s.shipsLost||0,shipsSunk:s.shipsSunk||0,landings:s.landings||0,bombards:s.bombards||0,tradeRuns:s.tradeRuns||0,tradeCredits:s.tradeCredits||0,seaCities:cs.filter(c=>c.sea).length,docks:cs.filter(c=>c.fac.indexOf('docks')>=0).length,kills:s.kills||0,founded:s.founded||0,score:score(S,f.id)};});}
 function gameSummary(S){const ts=S.turnSummaries;const samples=ts.filter(t=>t.t%10===0).map(t=>({t:t.t,f:t.factions.map(x=>[x.cities,x.pop,x.score,x.techs])}));
  const keyTypes=['shipSunk','landing','relation','betrayal','diplomacyStarted','cooperationStarted','warrenSurrendered','supplyCut','tunnelCollapsed','tunnelFlooded','capitalMoved','tunnelBreached','cityCaptured','cityDestroyed','eliminated','projectAnnounced','ascensionStarted','ascensionFailed','dominionStarted','victory','aiProject'];
  const plans={};for(const e of S.log)if(e.type==='aiPlan'){const k=e.f+':'+e.plan;plans[k]=(plans[k]||0)+1;}
@@ -971,16 +1006,17 @@ function buildLog(S,reason){
  {const D=dip(S);const pr=[];for(const a of S.factions)for(const b of S.factions)if(a.id<b.id)pr.push(a.name+'–'+b.name+' '+D.rel[a.id][b.id]+(D.ob[a.id][b.id]?' (open borders)':''));L.push('Diplomacy: '+pr.join('; '));
   L.push('Reputation: '+S.factions.map(f=>f.name+' '+D.rep[f.id]+' '+repLabel(D.rep[f.id])+(locked(S,f.id)?' [locked out until T'+D.lock[f.id]+']':'')).join(', ')+' | offers '+D.offers.length+', deals '+D.deals.length+', contracts '+D.contracts.length+', pending '+D.pending.length);}
  L.push('Policies: '+S.factions.map(f=>f.name+' '+POLICY_AXES.map(ax=>POLICIES[ax].opts[polOf(S,f.id,ax)].name).join('/')+' (changes '+((f.stats||{}).policyChanges||0)+(f.unrest>0?', unrest '+f.unrest:'')+')').join(' | '));
+ L.push('Fog: '+S.factions.map(f=>{const s=f.stats||{};return f.name+' sees '+(f.vis||[]).reduce((a,b)=>a+b,0)+' tiles, explored '+(f.seen||[]).reduce((a,b)=>a+b,0)+', ghosts '+(f.mem?Object.keys(f.mem.u).length:0)+', rediscovered '+(s.rediscovered||0)+', stacks lost '+(s.stacksLost||0);}).join(' | '));
  L.push('Morale: '+S.factions.map(f=>{const cs=S.cities.filter(c=>c.f===f.id),s=f.stats||{};return f.name+' content '+cs.filter(c=>(c.mood||'content')==='content').length+'/restless '+cs.filter(c=>c.mood==='restless').length+'/rioting '+cs.filter(c=>c.mood==='rioting').length+', riots '+(s.riots||0)+', war weariness '+(f.ww||0);}).join(' | ')+' | pressure x'+(diff(S).mor||1));
  L.push('Navies: '+S.factions.map(f=>{const s=f.stats||{};return f.name+' ships '+S.units.filter(u=>u.f===f.id&&isShip(u)).length+' (built '+(s.shipsBuilt||0)+', lost '+(s.shipsLost||0)+', sunk '+(s.shipsSunk||0)+'), landings '+(s.landings||0)+', bombards '+(s.bombards||0)+', trade runs '+(s.tradeRuns||0)+', sea cities '+S.cities.filter(c=>c.f===f.id&&c.sea).length;}).join('; '));
  if(S.winner!=null)L.push('GAME OVER: winner '+(S.winner>=0?S.factions[S.winner].name:'none')+' by '+S.winType+(S.winners?' (shared: '+S.winners.map(i=>S.factions[i].name).join(', ')+')':''));
  L.push('Errors recorded: '+S.errors.length+(S.errors.length?' (last: '+S.errors[S.errors.length-1].msg+')':''));
  L.push('Player actions: '+S.actions.length+'. Recent events:');
  for(const e of S.log.slice(-15)){const d=Object.assign({},e);delete d.t;delete d.type;L.push('  T'+e.t+' '+e.type+' '+JSON.stringify(d));}
- return{format:'colony4x-log',version:VERSION,seed:S.seed,turn:S.turn,reason,exportedAt:new Date().toISOString(),summary:L,opts:S.opts,errors:S.errors,actions:S.actions,turnSummaries:S.turnSummaries,stats:statsTable(S),diplomacy:(function(){const D=dip(S);return{relations:D.rel,openBorders:D.ob,contact:D.contact,reputation:D.rep,lockUntil:D.lock,offers:D.offers,deals:D.deals,contracts:D.contracts,pending:D.pending,dipTurns:D.dipTurns,coopTurns:D.coopTurns,winners:S.winners||null};})(),policies:{axes:POLICY_AXES,current:S.factions.map(f=>({f:f.id,pers:f.pers,policy:Object.fromEntries(POLICY_AXES.map(ax=>[ax,polOf(S,f.id,ax)])),unrest:f.unrest||0,changes:(f.stats||{}).policyChanges||0})),changes:S.log.filter(e=>e.type==='policyChanged')},morale:{pressure:diff(S).mor||1,cities:S.cities.map(c=>{const m=morale(S,c);return{f:c.f,city:c.name,pop:c.pop,v:m.v,mood:m.mood,parts:m.parts};}),warWeariness:S.factions.map(f=>f.ww||0),shifts:S.log.filter(e=>e.type==='moraleShift').length,riots:S.log.filter(e=>e.type==='riot')},naval:{ships:S.units.filter(isShip).map(u=>({id:u.id,f:u.f,type:u.type,at:u.at,hp:u.hp,cargo:cargoOf(S,u).map(x=>x.type)})),docks:S.cities.filter(c=>c.fac.indexOf('docks')>=0).map(c=>({f:c.f,city:c.name})),seaCities:S.cities.filter(c=>c.sea).map(c=>({f:c.f,city:c.name,pop:c.pop})),counts:(function(){const k={};for(const e of S.log)if(['shipBuilt','shipSunk','landing','boarded','bombard','tradeRun'].indexOf(e.type)>=0)k[e.type]=(k[e.type]||0)+1;return k;})()},events:S.log,snapshot:snapshot(S)};
+ return{format:'colony4x-log',version:VERSION,seed:S.seed,turn:S.turn,reason,exportedAt:new Date().toISOString(),summary:L,opts:S.opts,errors:S.errors,actions:S.actions,turnSummaries:S.turnSummaries,stats:statsTable(S),diplomacy:(function(){const D=dip(S);return{relations:D.rel,openBorders:D.ob,contact:D.contact,reputation:D.rep,lockUntil:D.lock,offers:D.offers,deals:D.deals,contracts:D.contracts,pending:D.pending,dipTurns:D.dipTurns,coopTurns:D.coopTurns,winners:S.winners||null};})(),policies:{axes:POLICY_AXES,current:S.factions.map(f=>({f:f.id,pers:f.pers,policy:Object.fromEntries(POLICY_AXES.map(ax=>[ax,polOf(S,f.id,ax)])),unrest:f.unrest||0,changes:(f.stats||{}).policyChanges||0})),changes:S.log.filter(e=>e.type==='policyChanged')},fog:{vision:S.factions.map(f=>({f:f.id,visible:(f.vis||[]).reduce((a,b)=>a+b,0),explored:(f.seen||[]).reduce((a,b)=>a+b,0),cities:f.mem?Object.keys(f.mem.c).length:0,ghosts:f.mem?Object.values(f.mem.u).map(g=>({f:g.f,type:g.type,at:g.at,t:g.t})).slice(0,60):[]})),rediscovered:S.log.filter(e=>e.type==='cityRediscovered'),stacksLost:S.log.filter(e=>e.type==='stackLostInFog'),encounters:S.log.filter(e=>e.type==='fogEncounter').length},morale:{pressure:diff(S).mor||1,cities:S.cities.map(c=>{const m=morale(S,c);return{f:c.f,city:c.name,pop:c.pop,v:m.v,mood:m.mood,parts:m.parts};}),warWeariness:S.factions.map(f=>f.ww||0),shifts:S.log.filter(e=>e.type==='moraleShift').length,riots:S.log.filter(e=>e.type==='riot')},naval:{ships:S.units.filter(isShip).map(u=>({id:u.id,f:u.f,type:u.type,at:u.at,hp:u.hp,cargo:cargoOf(S,u).map(x=>x.type)})),docks:S.cities.filter(c=>c.fac.indexOf('docks')>=0).map(c=>({f:c.f,city:c.name})),seaCities:S.cities.filter(c=>c.sea).map(c=>({f:c.f,city:c.name,pop:c.pop})),counts:(function(){const k={};for(const e of S.log)if(['shipBuilt','shipSunk','landing','boarded','bombard','tradeRun'].indexOf(e.type)>=0)k[e.type]=(k[e.type]||0)+1;return k;})()},events:S.log,snapshot:snapshot(S)};
 }
 function loadFromLog(L){const S=L.snapshot;_mapScale=bigScale(S.W,S.H);S.log=L.events||[];S.turnSummaries=L.turnSummaries||[];S.actions=L.actions||S.actions||[];S.errors=L.errors||[];return S;}
 function replay(L,uptoTurn){const S=newGame(Object.assign({},L.opts));for(const a of L.actions){if(uptoTurn&&S.turn>=uptoTurn)break;act(S,a);}return S;}
-const G={repAdd,fungusFriendly,moveCost,POLICY_AXES,polOf,switchCost,setPolicy,aiPolicyWant,morale,cityMorale,riot,moodEvent,pressure,MOOD_NAMES,costOf:(S,c,it)=>{_S=S;return itemCost(it,c);},defStrength,attStrength,isShip,coastal,hasDocks,portFor,cargoOf,transportAt,mapInfo,seaReach,canBombard,bombardTargets,bombard,seaSiteScore,seaHeld,aiShip,DIPLO,REL_NAMES,DEAL_NAMES,dip,relOf,atWar,passOK,repLabel,locked,pactCount,declareWar,validDeal,aiConsider,propose,answerOffer,dealText,setRel,diploTurn,victoryProgress,supplyMap,resCaps,collapseTunnel,floodTunnel,canFlood,bigScale,domShare,makeUnit,econTarget,fairLineup,gameSummary,graceTurn,POLICIES,policyMods,DIFFICULTY,DEFAULT_RULES,ECON_TARGET,DOMINION_SHARE,DOMINION_TURNS,rule,territory,suggestName,canFound,foundSite,statsTable,VERSION,TECHS,UNITS,FAC,TERRA,FACTIONS,newGame,act,endTurn,runAI,yields,cityYield,foodBox,popCap,techCost,availTechs,buildable,itemCost,itemName,buyCost,cityAt,unitsAt,nbrs,dist,X,Y,score,hash,buildLog,loadFromLog,replay,bfs,logEv,assignWork,siteScore};
+const G={visRadius,cityVisR,seesTile,knownOwner,knownMil,updateSeen,revealAround,repAdd,fungusFriendly,moveCost,POLICY_AXES,polOf,switchCost,setPolicy,aiPolicyWant,morale,cityMorale,riot,moodEvent,pressure,MOOD_NAMES,costOf:(S,c,it)=>{_S=S;return itemCost(it,c);},defStrength,attStrength,isShip,coastal,hasDocks,portFor,cargoOf,transportAt,mapInfo,seaReach,canBombard,bombardTargets,bombard,seaSiteScore,seaHeld,aiShip,DIPLO,REL_NAMES,DEAL_NAMES,dip,relOf,atWar,passOK,repLabel,locked,pactCount,declareWar,validDeal,aiConsider,propose,answerOffer,dealText,setRel,diploTurn,victoryProgress,supplyMap,resCaps,collapseTunnel,floodTunnel,canFlood,bigScale,domShare,makeUnit,econTarget,fairLineup,gameSummary,graceTurn,POLICIES,policyMods,DIFFICULTY,DEFAULT_RULES,ECON_TARGET,DOMINION_SHARE,DOMINION_TURNS,rule,territory,suggestName,canFound,foundSite,statsTable,VERSION,TECHS,UNITS,FAC,TERRA,FACTIONS,newGame,act,endTurn,runAI,yields,cityYield,foodBox,popCap,techCost,availTechs,buildable,itemCost,itemName,buyCost,cityAt,unitsAt,nbrs,dist,X,Y,score,hash,buildLog,loadFromLog,replay,bfs,logEv,assignWork,siteScore};
 if(typeof module!=='undefined'&&module.exports)module.exports=G;else root.G=G;
 })(this);

@@ -38,6 +38,7 @@ art from any existing game are used.
 8. **Specialists (MED)** – citizens as technicians / researchers instead of working tiles.
 9. **Psi combat vs natives (LOW)** – native fights use a morale-based strength, not weapons.
 10. **City governors & automation (LOW)** – auto-build / auto-explore / auto-terraform orders for the player.
+11. ~~**True fog of war (HIGH)**~~ – DONE in v0.9: current vision radius per unit/city (fast units and ships farther, +1 on rocky/high ground, Sensor Lattice tech +1), explored-but-unseen land dimmed with last-known terrain, last-seen ghosts for rival cities and armies, AI and combat use only what each faction actually sees; logs cityRediscovered / stackLostInFog / fogEncounter.
 11. **Energy grid & resonance links (LOW)** – bonuses for networks of connected cities/collectors.
 12. **Deep Warrens & tunnels** – see README design note.
 
