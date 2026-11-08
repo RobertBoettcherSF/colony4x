@@ -1,18 +1,18 @@
 --  Colony4X rules. The browser and the native scenario both call this
 --  package. JavaScript only draws the integers the engine returns.
 --
---  Not in this build (rejected in text, never simulated in JS):
---  warren supply sieges, tunnel flood/collapse, naval bombardment,
---  and the diplomacy bargain/trade AI. Factions start at war, which is
---  the Colony4X opening state, and stay there. Surface colonisation,
---  economy, research, fog, morale, policies, combat and the land AI are
---  the engine.
+--  Rules follow the JavaScript edition in game.js. status=pass in a
+--  report means every expectation held. status=fail means a mismatch.
+--  code=0 only together with status=pass. The process exit status is 0
+--  only when every report line says status=pass.
 package Colony is
 
    function Run_Watch_Check return Integer
      with Export, Convention => C, External_Name => "c4x_check_watch";
    function Run_Manual_Check return Integer
      with Export, Convention => C, External_Name => "c4x_check_manual";
+   function Run_Mechanics_Check return Integer
+     with Export, Convention => C, External_Name => "c4x_check_mechanics";
    function Report return String;
 
    function C_Ready return Integer
@@ -59,6 +59,12 @@ package Colony is
    Act_Control  : constant Integer := 14;
    Act_Handback : constant Integer := 15;
    Act_Policy   : constant Integer := 16;
+   Act_Bombard  : constant Integer := 17;
+   Act_Collapse : constant Integer := 18;
+   Act_Flood    : constant Integer := 19;
+   Act_Propose  : constant Integer := 20;
+   Act_Answer   : constant Integer := 21;
+   Act_War      : constant Integer := 22;
 
    --  Default rule bits: conquest, ascension, economic, dominion, events.
    Default_Rules : constant Integer := 143;

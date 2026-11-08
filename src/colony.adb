@@ -29,15 +29,16 @@ package body Colony is
       Tidal, Myco, Habitat, Plasma, Gravitic, Quantum, Synth, Sapper, Boring,
       Naval, Ordnance, Dread, Ascend);
    type Unit_Kind is
-     (Colonist, Sea_Colonist, Terraformer, Scout, Trooper, Warden, Lancer,
+     (Colonist, Sea_Colonist, Burrower, Terraformer, Scout, Trooper, Warden, Lancer,
       Striker, Skimmer, Skiff, Transport, Frigate, Cruiser, Beast, Rebel);
 
    type Fac_Kind is
      (Hydro, Fab, Spire, Shield, Dome, Docks, Fishery, Tidal_C, Rec, Theatre,
-      Beacon, Asc_Array);
+      Beacon, Asc_Array, Scrub);
 
    type Imp_Kind is (None, Farm, Mine, Solar);
-   type Work_Kind is (W_None, W_Clear, W_Road, W_Farm, W_Mine, W_Solar);
+   type Work_Kind is (W_None, W_Clear, W_Road, W_Farm, W_Mine, W_Solar, W_Tunnel);
+   type Rel_Kind is (Rel_War, Rel_Cease, Rel_Peace, Rel_Ally);
    type Nbr_Arr is array (0 .. 200) of Integer;
    type Queue_Arr is array (0 .. 5) of Integer;
    type Facs_Arr is array (0 .. 7) of Integer;
@@ -53,12 +54,14 @@ package body Colony is
       Elev               : Natural := 0;
       Imp                : Imp_Kind := None;
       Sea_Dist           : Natural := 99;
+      Tun                : Integer := -1;
+      Flooded, Collapsed : Boolean := False;
    end record;
 
    type Unit_Rec is record
-      Id, Fac, Loc, HP, MP, Home, Goto_At, Target, Work_Left, On_Ship : Integer := -1;
+      Id, Fac, Loc, HP, MP, Home, Goto_At, Target, Work_Left, On_Ship, Tn : Integer := -1;
       Kind  : Unit_Kind := Trooper;
-      Fort, Skip : Boolean := False;
+      Fort, Skip, No_Heal : Boolean := False;
       Work  : Work_Kind := W_None;
    end record;
 
@@ -70,7 +73,8 @@ package body Colony is
       Queue    : Queue_Arr := (others => -1);
       Facs     : Facs_Arr := (others => -1);
       Worked   : Worked_Arr := (others => -1);
-      Sea, Capital : Boolean := False;
+      Sea, Capital, UG, Res_Set : Boolean := False;
+      Air, Food_R, Pow, Cut, Low, Air_Out : Integer := 0;
       Mood     : Natural := 0;
       Mor10    : Integer := 30;
       Mood_Add : Integer := 0;
@@ -92,6 +96,29 @@ package body Colony is
    W, H, NTiles, Unit_N, City_N, Fac_N : Integer := 0;
    Next_Id, Turn_N, Human, Viewer, Winner, Win_Type : Integer := 0;
    Dom_Turns : array (0 .. 3) of Integer := (others => 0);
+   type Rel_Mat is array (0 .. 3, 0 .. 3) of Rel_Kind;
+   type Int_Mat is array (0 .. 3, 0 .. 3) of Integer;
+   type Bool_Mat is array (0 .. 3, 0 .. 3) of Boolean;
+   Rel : Rel_Mat := (others => (others => Rel_War));
+   Since : Int_Mat := (others => (others => 0));
+   Open_B, Contact : Bool_Mat := (others => (others => False));
+   Rep_V : array (0 .. 3) of Integer := (others => 50);
+   Lock_Until : array (0 .. 3) of Integer := (others => 0);
+   Fung_Cut : array (0 .. 3) of Integer := (others => 0);
+   type Contract_Rec is record
+      Live, Energy : Boolean := False;
+      Seller, Buyer, Amt, Left, Price : Integer := 0;
+   end record;
+   Contracts : array (0 .. 15) of Contract_Rec;
+   type Offer_Rec is record
+      Live, Buy, Energy : Boolean := False;
+      Id, From, To, Kind, Amt, Price, Turn : Integer := 0;
+   end record;
+   Pending : array (0 .. 7) of Offer_Rec;
+   Next_Offer : Integer := 1;
+   Last_Hits : Integer := 0;
+   Ask : array (0 .. 3, 0 .. 3, 0 .. 4) of Integer :=
+     (others => (others => (others => -100)));
    Asc_On : Boolean := False;
    Asc_Fac, Asc_City, Asc_Left : Integer := 0;
    Difficulty, Max_Turns, Last_Status : Integer := 0;
@@ -119,6 +146,15 @@ package body Colony is
    Ev_Head, Ev_Count : Natural := 0;
 
    procedure Update_Seen (Fid : Integer);
+   procedure Supply_Turn;
+   procedure Diplo_Turn;
+   procedure AI_Diplomacy (Fid : Integer);
+   procedure AI_Collapse (Fid : Integer);
+   function Collapse_Tunnel (Fid, Tile : Integer) return String;
+   function U_Bomb (K : Unit_Kind) return Boolean;
+   function Bombard (Uidx, Tile : Integer) return Boolean;
+   function At_War (A, B : Integer) return Boolean;
+   function Pass_OK (Fid, Owner : Integer) return Boolean;
 
    function Rule (Bit : Natural) return Boolean is
      ((Rules and Interfaces.Shift_Left (U32'(1), Bit)) /= 0);
@@ -254,6 +290,7 @@ package body Colony is
       case K is
          when Colonist => return 30;
          when Sea_Colonist => return 40;
+         when Burrower => return 35;
          when Terraformer => return 20;
          when Scout => return 15;
          when Trooper => return 25;
@@ -272,7 +309,7 @@ package body Colony is
    function U_Atk (K : Unit_Kind) return Integer is
    begin
       case K is
-         when Colonist | Sea_Colonist | Terraformer | Transport => return 0;
+         when Colonist | Sea_Colonist | Burrower | Terraformer | Transport => return 0;
          when Scout | Warden | Skiff => return 1;
          when Trooper | Beast | Rebel => return 2;
          when Frigate => return 3;
@@ -285,7 +322,7 @@ package body Colony is
    function U_Def (K : Unit_Kind) return Integer is
    begin
       case K is
-         when Colonist | Sea_Colonist | Terraformer | Scout | Transport | Rebel | Skiff => return 1;
+         when Colonist | Sea_Colonist | Burrower | Terraformer | Scout | Transport | Rebel | Skiff => return 1;
          when Trooper | Lancer | Beast => return 2;
          when Warden | Striker | Skimmer | Frigate => return 3;
          when Cruiser => return 5;
@@ -303,7 +340,7 @@ package body Colony is
    end U_Mv;
 
    function U_Civ (K : Unit_Kind) return Boolean is
-     (K in Colonist | Sea_Colonist | Terraformer | Transport);
+     (K in Colonist | Sea_Colonist | Burrower | Terraformer | Transport);
 
    function U_Ship (K : Unit_Kind) return Boolean is
      (K in Skiff | Transport | Frigate | Cruiser);
@@ -312,12 +349,13 @@ package body Colony is
      (K in Beast | Rebel);
 
    function U_Found (K : Unit_Kind) return Boolean is
-     (K in Colonist | Sea_Colonist);
+     (K in Colonist | Sea_Colonist | Burrower);
 
    function U_Tech (K : Unit_Kind) return Integer is
    begin
       case K is
          when Sea_Colonist => return Tech_Kind'Pos (Tidal);
+         when Burrower => return Tech_Kind'Pos (Boring);
          when Warden => return Tech_Kind'Pos (Lattice);
          when Lancer => return Tech_Kind'Pos (Kinetic);
          when Striker => return Tech_Kind'Pos (Plasma);
@@ -334,6 +372,7 @@ package body Colony is
       case K is
          when Colonist => return "Colonist";
          when Sea_Colonist => return "Sea Colonist";
+         when Burrower => return "Burrower";
          when Terraformer => return "Terraformer";
          when Scout => return "Scout";
          when Trooper => return "Trooper";
@@ -355,6 +394,7 @@ package body Colony is
       case K is
          when Colonist => return "C";
          when Sea_Colonist => return "~";
+         when Burrower => return "U";
          when Terraformer => return "T";
          when Scout => return "S";
          when Trooper => return "I";
@@ -386,6 +426,7 @@ package body Colony is
          when Theatre => return "Dreamweave Theatre";
          when Beacon => return "Resonance Beacon";
          when Asc_Array => return "Ascension Array";
+         when Scrub => return "CO2 Scrubbers";
       end case;
    end F_Name;
 
@@ -397,7 +438,7 @@ package body Colony is
          when Shield => return 45;
          when Dome | Theatre => return 60;
          when Docks | Fishery | Rec => return 35;
-         when Tidal_C => return 40;
+         when Tidal_C | Scrub => return 40;
          when Beacon => return 300;
          when Asc_Array => return 900;
       end case;
@@ -423,6 +464,7 @@ package body Colony is
          when Docks | Fishery | Tidal_C => return Tech_Kind'Pos (Naval);
          when Theatre => return Tech_Kind'Pos (Signal);
          when Beacon | Asc_Array => return Tech_Kind'Pos (Ascend);
+         when Scrub => return Tech_Kind'Pos (Boring);
          when Rec => return -1;
       end case;
    end F_Tech;
@@ -489,12 +531,12 @@ package body Colony is
          when Gravitic => return "Unlocks the Skimmer.";
          when Quantum => return "+25% research.";
          when Synth => return "+2 minerals in every city.";
-         when Sapper => return "On the tree. Warren assaults are not in this build.";
-         when Boring => return "On the tree. Warren construction is not in this build.";
+         when Sapper => return "Assault warrens from the surface and flood any tunnel.";
+         when Boring => return "Unlocks the Burrower: warrens and tunnels.";
          when Naval => return "Unlocks docks, fisheries, tidal collectors and ships.";
-         when Ordnance => return "Unlocks the Frigate. Bombardment orders are not in this build.";
+         when Ordnance => return "Unlocks the Frigate, which can bombard a coastal city.";
          when Dread => return "Unlocks the Assault Cruiser.";
-         when Ascend => return "Unlocks the Resonance Beacon and the Ascension Asc_Array.";
+         when Ascend => return "Unlocks the Resonance Beacon and the Ascension Array.";
       end case;
    end Tech_Blurb;
 
@@ -708,6 +750,8 @@ package body Colony is
       U.Target := -1;
       U.Home := -1;
       U.On_Ship := -1;
+      U.Tn := 0;
+      U.No_Heal := False;
       Units (Unit_N) := U;
       Unit_N := Unit_N + 1;
       return Unit_N - 1;
@@ -736,7 +780,7 @@ package body Colony is
       return False;
    end Has_Docks;
 
-   procedure Yield3 (I, Fid : Integer; N, Mi, En : out Integer) is
+   procedure Yield3 (I, Fid : Integer; N, Mi, En : out Integer; UG : Boolean := False) is
       T : Tile;
    begin
       N := 0; Mi := 0; En := 0;
@@ -744,6 +788,15 @@ package body Colony is
          return;
       end if;
       T := Tiles (I);
+      if UG then
+         if T.Land then
+            Mi := 1 + T.Rock + (if T.Rock = 2 then 1 else 0);
+            if T.Tun >= 0 then
+               En := 1;
+            end if;
+         end if;
+         return;
+      end if;
       if not T.Land then
          N := 1;
          if Has_Tech (Fid, Tech_Kind'Pos (Tidal)) then
@@ -887,7 +940,7 @@ package body Colony is
       BV, V : Long_Float;
    begin
       for O in 0 .. City_N - 1 loop
-         if O /= C then
+         if O /= C and then Cities (O).UG = Cities (C).UG then
             for Wk in 0 .. Cities (O).Work_N - 1 loop
                if Cities (O).Worked (Wk) in 0 .. NTiles - 1 then
                   Taken (Cities (O).Worked (Wk)) := True;
@@ -938,7 +991,7 @@ package body Colony is
       Mi := Integer'Max (1, B);
       En := Integer'Max (1, D) + 2;
       for Wk in 0 .. Cities (C).Work_N - 1 loop
-         Yield3 (Cities (C).Worked (Wk), Cities (C).Fac, A, B, D);
+         Yield3 (Cities (C).Worked (Wk), Cities (C).Fac, A, B, D, Cities (C).UG);
          N := N + A;
          Mi := Mi + B;
          En := En + D;
@@ -973,7 +1026,8 @@ package body Colony is
    end Food_Box;
 
    function Pop_Cap (C : Integer) return Integer is
-     (if City_Has (C, Dome) then 14 else 8);
+     (if Cities (C).UG then (if City_Has (C, Dome) then 10 else 6)
+      else (if City_Has (C, Dome) then 14 else 8));
 
    function Tech_Cost (Fid : Integer) return Integer is
       NC : constant Integer := Count_Cities (Fid);
@@ -1161,6 +1215,7 @@ package body Colony is
            and then not City_Has (C, K)
            and then not Queue_Has (C, Code)
            and then not (F_Coast (K) and then not Coastal (C))
+           and then not (K = Scrub and then not Cities (C).UG)
            and then not (F_Project (K) and then
              (for some O in 0 .. City_N - 1 =>
                 Cities (O).Fac = Cities (C).Fac and then Queue_Has (O, Code)))
@@ -1195,6 +1250,7 @@ package body Colony is
            and then not City_Has (C, K)
            and then not Queue_Has (C, Code)
            and then not (F_Coast (K) and then not Coastal (C))
+           and then not (K = Scrub and then not Cities (C).UG)
            and then not (F_Project (K) and then
              (for some O in 0 .. City_N - 1 =>
                 Cities (O).Fac = Cities (C).Fac and then Queue_Has (O, Code)))
@@ -1288,7 +1344,17 @@ package body Colony is
       if Loc < 0 or else Loc >= NTiles then
          return "No site here";
       end if;
-      if U.Kind = Sea_Colonist then
+      if U.Kind = Burrower then
+         if not Tiles (Loc).Land then
+            return "Must be on land";
+         end if;
+         if Loc /= U.Loc then
+            return "Found on the colonist's own tile";
+         end if;
+         if not (Tiles (Loc).Rock = 2 or else Tiles (Loc).Elev > 60) then
+            return "Underground bases need rocky or high ground";
+         end if;
+      elsif U.Kind = Sea_Colonist then
          if Tiles (Loc).Land then
             return "Sea colonists found on ocean tiles";
          end if;
@@ -1345,7 +1411,8 @@ package body Colony is
       C.Food := 0;
       C.Prod := 0;
       C.Founded := Turn_N;
-      C.Sea := not Tiles (Loc).Land;
+      C.Sea := not Tiles (Loc).Land and then Units (Uidx).Kind /= Burrower;
+      C.UG := Units (Uidx).Kind = Burrower;
       C.Capital := Count_Cities (C.Fac) = 0;
       if NL = 0 then
          Set_Name (C, "Colony");
@@ -1358,8 +1425,12 @@ package body Colony is
       end if;
       Cities (City_N) := C;
       City_N := City_N + 1;
-      Tiles (Loc).Fungus := False;
-      Tiles (Loc).Road := True;
+      if Cities (City_N - 1).UG then
+         Tiles (Loc).Tun := Cities (City_N - 1).Fac;
+      else
+         Tiles (Loc).Fungus := False;
+         Tiles (Loc).Road := True;
+      end if;
       Factions (C.Fac).Founded := Factions (C.Fac).Founded + 1;
       Remove_Unit (Uidx);
       Assign_Work (City_N - 1);
@@ -1624,6 +1695,9 @@ package body Colony is
       end if;
       if C >= 0 then
          D := D * 1.25;
+         if Cities (C).UG and then not (Att >= 0 and then Has_Tech (Units (Att).Fac, Tech_Kind'Pos (Sapper))) then
+            D := D * 1.5;
+         end if;
          if Turn_N - Cities (C).Founded < 15 then
             D := D * 1.5;
          end if;
@@ -1824,9 +1898,52 @@ package body Colony is
          end if;
       end if;
       From := Units (U).Loc;
+      declare
+         Block : Integer := -1;
+         Ow : Integer;
+      begin
+         for O in 0 .. Unit_N - 1 loop
+            if Units (O).Loc = To and then Units (O).Fac /= Units (U).Fac
+              and then Units (O).On_Ship < 0 and then not At_War (Units (U).Fac, Units (O).Fac)
+            then
+               Block := Units (O).Fac;
+            end if;
+         end loop;
+         declare
+            CC : constant Integer := City_At (To);
+         begin
+            if CC >= 0 and then not At_War (Units (U).Fac, Cities (CC).Fac) then
+               Block := Cities (CC).Fac;
+            end if;
+         end;
+         if Block >= 0 then
+            Set_Error ("Declare war first");
+            return False;
+         end if;
+         if Units (U).Fac >= 0 and then (Tiles (To).Land or else City_At (To) >= 0) then
+            Territory;
+            Ow := Terr (To);
+            if Ow >= 0 and then not Pass_OK (Units (U).Fac, Ow) and then Terr (From) /= Ow then
+               Set_Error ("Closed borders");
+               return False;
+            end if;
+         end if;
+      end;
       Units (U).Fort := False;
       Units (U).Work := W_None;
       if Enemy_At (To, Units (U).Fac) then
+         declare
+            WC : constant Integer := City_At (To);
+         begin
+            if WC >= 0 and then Cities (WC).UG and then Cities (WC).Fac /= Units (U).Fac
+              and then Tiles (Units (U).Loc).Tun < 0
+              and then U_Atk (Units (U).Kind) < 4
+              and then not Has_Tech (Units (U).Fac, Tech_Kind'Pos (Sapper))
+            then
+               Set_Error ("Underground base: attack from a tunnel tile or with an attack-4+ unit");
+               return False;
+            end if;
+         end;
          if U_Atk (Units (U).Kind) <= 0 then
             Set_Error ("Non-combat unit cannot attack");
             return False;
@@ -1907,8 +2024,22 @@ package body Colony is
       if U_Ship (Units (U).Kind) then
          Cost := 1;
       end if;
+      if Units (U).Fac >= 0 and then Tiles (From).Tun = Units (U).Fac
+        and then Tiles (To).Tun = Units (U).Fac
+        and then not Tiles (From).Flooded and then not Tiles (To).Flooded
+        and then Units (U).Tn < 8
+      then
+         Cost := 0;
+         Units (U).Tn := Units (U).Tn + 1;
+      end if;
       Units (U).MP := Integer'Max (0, Units (U).MP - Cost);
       Units (U).Loc := To;
+      if Units (U).Fac >= 0 and then Tiles (To).Tun >= 0 and then Tiles (To).Tun /= Units (U).Fac
+        and then At_War (Units (U).Fac, Tiles (To).Tun) and then City_At (To) < 0
+      then
+         Tiles (To).Tun := Units (U).Fac;
+         Log ("T" & Img (Turn_N) & " tunnel breached");
+      end if;
       if U_Ship (Units (U).Kind) then
          for O in 0 .. Unit_N - 1 loop
             if Units (O).On_Ship = Units (U).Id then
@@ -1922,7 +2053,7 @@ package body Colony is
       return True;
    end Step;
 
-   procedure BFS (Start, Fid, Max_D : Integer) is
+   procedure BFS (Start, Fid, Max_D : Integer; Ignore_Enemy : Boolean := False) is
       Q : array (0 .. Max_Tiles - 1) of Integer;
       Qh, Qt : Integer := 0;
       C, Nx, Ny, N : Integer;
@@ -1952,7 +2083,9 @@ package body Colony is
       while Qh < Qt loop
          C := Q (Qh);
          Qh := Qh + 1;
-         if Dist_A (C) < Max_D and then (C = Start or else (Occ_A (C) and 1) = 0) then
+         if Dist_A (C) < Max_D
+           and then (C = Start or else Ignore_Enemy or else (Occ_A (C) and 1) = 0)
+         then
             for DY in -1 .. 1 loop
                for DX in -1 .. 1 loop
                   if DX /= 0 or else DY /= 0 then
@@ -2049,6 +2182,7 @@ package body Colony is
          when W_Farm => Turns := 3;
          when W_Mine => Turns := 5;
          when W_Solar => Turns := 4;
+         when W_Tunnel => Turns := 2;
          when W_None => return;
       end case;
       Turns := Integer'Max (1, JS_Round (Long_Float (Turns) * M.Terra));
@@ -2152,6 +2286,48 @@ package body Colony is
          Cities (C).Q_Len := 1;
          return;
       end if;
+      if not Cities (C).UG and then Can_Build (Fid, Unit_Kind'Pos (Burrower)) then
+         declare
+            Wars, Burs, Tuns : Integer := 0;
+         begin
+            for O in 0 .. City_N - 1 loop
+               if Cities (O).Fac = Fid and then Cities (O).UG then
+                  Wars := Wars + 1;
+               end if;
+            end loop;
+            for V in 0 .. Unit_N - 1 loop
+               if Units (V).Fac = Fid and then Units (V).Kind = Burrower then
+                  Burs := Burs + 1;
+               end if;
+            end loop;
+            for I in 0 .. NTiles - 1 loop
+               if Tiles (I).Tun = Fid then
+                  Tuns := Tuns + 1;
+               end if;
+            end loop;
+            if Count_Cities (Fid) <= 2 and then Wars = 0 and then Burs = 0
+              and then Cities (C).Pop >= 2 and then Turn_N > 60 and then Rand < 0.6
+            then
+               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
+               Cities (C).Q_Len := 1;
+               return;
+            end if;
+            if Cities (C).Pop >= 3 and then Burs < 1 and then Count_Cities (Fid) >= 2
+              and then (Wars < 2 or else (Wars < 3 and then Key = 0)) and then Rand < 0.45
+            then
+               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
+               Cities (C).Q_Len := 1;
+               return;
+            end if;
+            if Wars >= 1 and then Burs < 1 and then Tuns < Wars * 6
+              and then Cities (C).Pop >= 3 and then Rand < 0.35
+            then
+               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
+               Cities (C).Q_Len := 1;
+               return;
+            end if;
+         end;
+      end if;
       if Count_Cities (Fid) < Target and then Cities (C).Pop >= 2
         and then Cols < (Count_Cities (Fid) + 1) / 2
       then
@@ -2181,7 +2357,7 @@ package body Colony is
          return;
       end if;
       for K in Fac_Kind loop
-         if not F_Project (K) and then not F_Coast (K)
+         if not F_Project (K) and then not F_Coast (K) and then K /= Scrub
            and then Can_Build (Fid, 100 + Fac_Kind'Pos (K))
            and then not City_Has (C, K)
            and then (K /= Dome or else Cities (C).Pop >= 6)
@@ -2196,6 +2372,147 @@ package body Colony is
       Cities (C).Q_Len := 1;
    end AI_City;
 
+   procedure AI_Burrower (U : Integer) is
+      Fid : constant Integer := Units (U).Fac;
+      Wars : Integer := 0;
+      Best : Integer := -1;
+      BS, Sc : Long_Float;
+      Nb : Nbr_Arr;
+      NN : Natural;
+      Job, Near_C, ND : Integer;
+   begin
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = Fid and then Cities (C).UG then
+            Wars := Wars + 1;
+         end if;
+      end loop;
+      if Wars < 2 then
+         BFS (Units (U).Loc, Fid, 10);
+         BS := -1.0e9;
+         for I in 0 .. NTiles - 1 loop
+            if Dist_A (I) >= 0 and then Tiles (I).Land
+              and then (Tiles (I).Rock = 2 or else Tiles (I).Elev > 60)
+              and then Can_Found (U, I) = ""
+            then
+               declare
+                  Taken : Boolean := False;
+               begin
+                  for O in 0 .. Unit_N - 1 loop
+                     if O /= U and then Units (O).Fac = Fid and then Units (O).Kind = Burrower
+                       and then Units (O).Target = I
+                     then
+                        Taken := True;
+                     end if;
+                  end loop;
+                  if not Taken then
+                     Sc := 0.0;
+                     Nbrs (I, 2, NN, Nb);
+                     for K in 0 .. NN - 1 loop
+                        if Tiles (Nb (K)).Land then
+                           Sc := Sc + 1.0 + Long_Float (Tiles (Nb (K)).Rock);
+                        end if;
+                     end loop;
+                     Sc := Sc - Long_Float (Dist_A (I)) * 1.5;
+                     if Sc > BS then
+                        BS := Sc;
+                        Best := I;
+                     end if;
+                  end if;
+               end;
+            end if;
+         end loop;
+         if Best >= 0 then
+            Units (U).Target := Best;
+            if Units (U).Loc /= Best then
+               Move_Toward (U, Best, 12);
+            end if;
+            declare
+               Id : constant Integer := Units (U).Id;
+               V : constant Integer := Find_Unit (Id);
+            begin
+               if V >= 0 and then Units (V).Loc = Best and then Units (V).MP > 0 then
+                  if not Found_City (V) then
+                     null;
+                  end if;
+               end if;
+            end;
+            return;
+         end if;
+      end if;
+      if Wars = 0 then
+         return;
+      end if;
+      Job := -1;
+      for W in 0 .. City_N - 1 loop
+         exit when Job >= 0;
+         if Cities (W).Fac = Fid and then Cities (W).UG then
+            Near_C := -1;
+            ND := 99;
+            for C in 0 .. City_N - 1 loop
+               if Cities (C).Fac = Fid and then not Cities (C).UG
+                 and then Dist (Cities (C).Loc, Cities (W).Loc) < ND
+               then
+                  ND := Dist (Cities (C).Loc, Cities (W).Loc);
+                  Near_C := Cities (C).Loc;
+               end if;
+            end loop;
+            if Near_C >= 0 and then ND <= 14 then
+               BFS (Cities (W).Loc, Fid, 16, True);
+               if Dist_A (Near_C) >= 0 then
+                  declare
+                     Path : array (0 .. 40) of Integer;
+                     PN : Natural := 0;
+                     C : Integer := Near_C;
+                  begin
+                     while C >= 0 and then C /= Cities (W).Loc and then PN < Path'Length loop
+                        Path (PN) := C;
+                        PN := PN + 1;
+                        C := Prev_A (C);
+                     end loop;
+                     for K in reverse 0 .. PN - 1 loop
+                        if Tiles (Path (K)).Tun /= Fid and then Tiles (Path (K)).Land then
+                           declare
+                              Taken : Boolean := False;
+                           begin
+                              for O in 0 .. Unit_N - 1 loop
+                                 if O /= U and then Units (O).Fac = Fid and then Units (O).Kind = Burrower
+                                   and then Units (O).Target = Path (K)
+                                 then
+                                    Taken := True;
+                                 end if;
+                              end loop;
+                              if not Taken then
+                                 Job := Path (K);
+                                 exit;
+                              end if;
+                           end;
+                        end if;
+                     end loop;
+                  end;
+               end if;
+            end if;
+         end if;
+      end loop;
+      if Job < 0 then
+         Units (U).Fort := True;
+         return;
+      end if;
+      Units (U).Target := Job;
+      if Units (U).Loc /= Job then
+         Move_Toward (U, Job, 20);
+      end if;
+      declare
+         Id : constant Integer := Units (U).Id;
+         V : constant Integer := Find_Unit (Id);
+      begin
+         if V >= 0 and then Units (V).Loc = Job and then Tiles (Job).Tun /= Fid then
+            Units (V).Work := W_Tunnel;
+            Units (V).Work_Left := (if Tiles (Job).Rock = 2 then 3 else 2);
+            Units (V).MP := 0;
+         end if;
+      end;
+   end AI_Burrower;
+
    procedure AI_Unit (U : Integer) is
       Fid : constant Integer := Units (U).Fac;
       Best, BD : Integer;
@@ -2206,7 +2523,35 @@ package body Colony is
       if U < 0 or else Units (U).MP <= 0 or else Units (U).Work /= W_None then
          return;
       end if;
-      if Units (U).Fac < 0 or else U_Ship (Units (U).Kind) or else Units (U).On_Ship >= 0 then
+      if Units (U).Fac < 0 then
+         return;
+      end if;
+      if U_Bomb (Units (U).Kind) and then Units (U).HP >= 5
+        and then not Tiles (Units (U).Loc).Land and then City_At (Units (U).Loc) < 0
+      then
+         declare
+            Nb : Nbr_Arr;
+            NN : Natural;
+            CC : Integer;
+         begin
+            Nbrs (Units (U).Loc, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               CC := City_At (Nb (K));
+               if CC >= 0 and then Cities (CC).Fac /= Fid
+                 and then (Cities (CC).Fac < 0 or else At_War (Fid, Cities (CC).Fac))
+               then
+                  if Bombard (U, Nb (K)) then
+                     return;
+                  end if;
+               end if;
+            end loop;
+         end;
+      end if;
+      if U_Ship (Units (U).Kind) or else Units (U).On_Ship >= 0 then
+         return;
+      end if;
+      if Units (U).Kind = Burrower then
+         AI_Burrower (U);
          return;
       end if;
       if Units (U).Kind = Colonist then
@@ -2381,6 +2726,7 @@ package body Colony is
          return;
       end if;
       Update_Seen (Fid);
+      AI_Diplomacy (Fid);
       if Turn_N >= 15 and then not Factions (Fid).Policy_Set then
          for Axis in 0 .. 3 loop
             Factions (Fid).Pol (Axis) := AI_Pol (Slot_Key (Fid), Axis);
@@ -2439,6 +2785,7 @@ package body Colony is
             AI_Unit (U);
          end if;
       end loop;
+      AI_Collapse (Fid);
       Update_Seen (Fid);
    end Run_AI;
 
@@ -2944,6 +3291,1118 @@ package body Colony is
       end if;
    end Check_Victory;
 
+   function At_War (A, B : Integer) return Boolean is
+   begin
+      if A = B then
+         return False;
+      end if;
+      if A < 0 or else B < 0 then
+         return True;
+      end if;
+      if A >= Fac_N or else B >= Fac_N then
+         return True;
+      end if;
+      return Rel (A, B) = Rel_War;
+   end At_War;
+
+   function Pass_OK (Fid, Owner : Integer) return Boolean is
+   begin
+      if Owner < 0 or else Fid < 0 or else Owner = Fid then
+         return True;
+      end if;
+      if Owner >= Fac_N or else Fid >= Fac_N then
+         return True;
+      end if;
+      return Rel (Fid, Owner) = Rel_War or else Rel (Fid, Owner) = Rel_Ally
+        or else Open_B (Fid, Owner);
+   end Pass_OK;
+
+   function Rel_Code (A, B : Integer) return Integer is
+   begin
+      case Rel (A, B) is
+         when Rel_War => return 0;
+         when Rel_Cease => return 1;
+         when Rel_Peace => return 2;
+         when Rel_Ally => return 3;
+      end case;
+   end Rel_Code;
+
+   procedure Set_Rel (A, B : Integer; R : Rel_Kind) is
+   begin
+      Rel (A, B) := R;
+      Rel (B, A) := R;
+      Since (A, B) := Turn_N;
+      Since (B, A) := Turn_N;
+      if R = Rel_War or else R = Rel_Cease then
+         Open_B (A, B) := False;
+         Open_B (B, A) := False;
+      end if;
+      if R = Rel_War then
+         for I in Contracts'Range loop
+            if Contracts (I).Live
+              and then ((Contracts (I).Seller = A and then Contracts (I).Buyer = B)
+                        or else (Contracts (I).Seller = B and then Contracts (I).Buyer = A))
+            then
+               Contracts (I).Live := False;
+            end if;
+         end loop;
+      end if;
+   end Set_Rel;
+
+   function Declare_War (A, B : Integer) return String is
+      Prev : Rel_Kind;
+      Pen : Integer;
+   begin
+      if A = B or else B not in 0 .. Fac_N - 1 or else not Factions (B).Alive then
+         return "No such faction";
+      end if;
+      Prev := Rel (A, B);
+      if Prev = Rel_War then
+         return "Already at war";
+      end if;
+      Pen := (case Prev is
+                 when Rel_Cease => 15, when Rel_Peace => 25, when Rel_Ally => 35, when Rel_War => 0);
+      if Pen > 0 then
+         Rep_V (A) := Integer'Max (0, Rep_V (A) - Pen);
+         Lock_Until (A) := Turn_N + 30;
+         Log ("T" & Img (Turn_N) & " " & Colony_Names.Faction_Name (Slot_Key (A)) & " breaks a treaty");
+      end if;
+      Set_Rel (A, B, Rel_War);
+      Log ("T" & Img (Turn_N) & " war declared");
+      return "";
+   end Declare_War;
+
+   function Victory_Progress (Fid : Integer) return Long_Float is
+      P : Long_Float := Long_Float (Factions (Fid).Tech_N) / 22.0 * 0.35;
+      Cred : Long_Float;
+   begin
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = Fid and then City_Has (C, Beacon) then
+            P := P + 0.15;
+         end if;
+      end loop;
+      if Asc_On and then Asc_Fac = Fid and then Asc_Left > 0 then
+         P := 0.8 + 0.2 * (1.0 - Long_Float (Asc_Left) / 12.0);
+      end if;
+      if Rule (2) then
+         Cred := Long_Float (Factions (Fid).Credits) / Long_Float (Integer'Max (1, Econ_Target)) * 0.95;
+         if Cred > P then
+            P := Cred;
+         end if;
+      end if;
+      if P > 1.0 then
+         P := 1.0;
+      end if;
+      return P;
+   end Victory_Progress;
+
+   function Mil_Power (Fid : Integer) return Long_Float is
+      M : Long_Float := 0.0;
+   begin
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac = Fid and then not U_Civ (Units (U).Kind) then
+            M := M + Long_Float (U_Atk (Units (U).Kind) + U_Def (Units (U).Kind))
+              * Long_Float (Units (U).HP) / 10.0;
+         end if;
+      end loop;
+      return M;
+   end Mil_Power;
+
+   function Known_Mil (A, B : Integer) return Long_Float is
+      M : Long_Float := 0.0;
+   begin
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac = B and then not U_Civ (Units (U).Kind)
+           and then (A < 0 or else (A < Fac_N and then Factions (A).Vis (Units (U).Loc)))
+         then
+            M := M + Long_Float (U_Atk (Units (U).Kind) + U_Def (Units (U).Kind))
+              * Long_Float (Units (U).HP) / 10.0;
+         end if;
+      end loop;
+      return M;
+   end Known_Mil;
+
+   function Strength_Of (A, B : Integer) return Long_Float is
+     ((Mil_Power (A) + 5.0) / (Known_Mil (A, B) + 5.0));
+
+   function Fungus_Friendly (Fid : Integer) return Long_Float is
+      Base : Long_Float;
+   begin
+      if Fid in 0 .. 3 and then Slot_Key (Fid) = 2 then
+         Base := 20.0;
+      else
+         Base := 10.0;
+         if Fid in 0 .. 3 then
+            Base := Long_Float (10 - Fung_Cut (Fid));
+         end if;
+         if Base < -10.0 then
+            Base := -10.0;
+         end if;
+      end if;
+      if Fid in 0 .. Fac_N - 1 then
+         Base := Base + Policy (Fid).Fung_Rel;
+      end if;
+      return Base;
+   end Fungus_Friendly;
+
+   function Deal_OK (From, To, Kind : Integer; Buy, Energy : Boolean; Amt, Price : Integer) return String is
+      R : Rel_Kind;
+      Held : Integer;
+      pragma Unreferenced (Energy);
+   begin
+      if From = To or else To not in 0 .. Fac_N - 1 or else From not in 0 .. Fac_N - 1
+        or else not Factions (To).Alive or else not Factions (From).Alive
+      then
+         return "No such faction";
+      end if;
+      if not Contact (From, To) then
+         return "No contact yet";
+      end if;
+      R := Rel (From, To);
+      Held := Turn_N - Since (From, To);
+      case Kind is
+         when 0 =>
+            if R /= Rel_War then
+               return "Not at war";
+            end if;
+         when 1 =>
+            if R /= Rel_Cease then
+               return "Needs a ceasefire first";
+            end if;
+            if Held < 3 then
+               return "Ceasefire must hold 3 turns first";
+            end if;
+         when 2 =>
+            if R /= Rel_Peace then
+               return "Needs a peace treaty first";
+            end if;
+            if Held < 8 then
+               return "Peace must hold 8 turns first";
+            end if;
+         when 3 =>
+            if R = Rel_Ally then
+               return "Allies already share passage";
+            end if;
+            if R /= Rel_Peace then
+               return "Needs a peace treaty first";
+            end if;
+            if Open_B (From, To) then
+               return "Borders already open";
+            end if;
+         when 4 =>
+            if R = Rel_War then
+               return "Cannot trade while at war";
+            end if;
+            if Amt < 1 or else Amt > 6 or else Price < 0 or else Price > 500 then
+               return "Bad trade terms";
+            end if;
+            for I in Contracts'Range loop
+               if Contracts (I).Live
+                 and then ((Contracts (I).Seller = From and then Contracts (I).Buyer = To)
+                           or else (Contracts (I).Seller = To and then Contracts (I).Buyer = From))
+               then
+                  return "A trade contract is already running";
+               end if;
+            end loop;
+            declare
+               Buyer : constant Integer := (if Buy then From else To);
+            begin
+               if Factions (Buyer).Credits < Price then
+                  return "Lacks credits";
+               end if;
+            end;
+         when others =>
+            return "Unknown deal";
+      end case;
+      return "";
+   end Deal_OK;
+
+   function Common_Enemy (Me, Other : Integer) return Boolean is
+   begin
+      for X in 0 .. Fac_N - 1 loop
+         if X /= Me and then X /= Other and then Factions (X).Alive
+           and then Rel (Me, X) = Rel_War and then Rel (Other, X) = Rel_War
+         then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Common_Enemy;
+
+   function Has_Ally (Me : Integer) return Boolean is
+   begin
+      for X in 0 .. Fac_N - 1 loop
+         if X /= Me and then Factions (X).Alive and then Rel (Me, X) = Rel_Ally then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_Ally;
+
+   function Consider (Me, Other, Kind : Integer; Buy, Energy : Boolean; Amt, Price : Integer) return Boolean is
+      Pers : constant Integer := Slot_Key (Me);
+      SR : constant Long_Float := Strength_Of (Me, Other);
+      Prox : Long_Float := Victory_Progress (Other);
+      Losing : constant Boolean := SR < 0.7;
+      FF : Long_Float := 0.0;
+      Rep : constant Integer := Rep_V (Other);
+      Locked : constant Boolean := Lock_Until (Other) > Turn_N;
+      Held : constant Integer := Turn_N - Since (Me, Other);
+   begin
+      if Rule (2)
+        and then Long_Float (Factions (Other).Credits)
+          >= Long_Float (Econ_Target) * (if Pers = 2 then 0.55 else 0.35)
+      then
+         if Prox < 0.65 then
+            Prox := 0.65;
+         end if;
+      end if;
+      if Pers = 2 then
+         FF := Fungus_Friendly (Other);
+      end if;
+      case Kind is
+         when 0 =>
+            if Pers = 0 then
+               return Losing;
+            end if;
+            if Prox > 0.6 and then not Losing then
+               return False;
+            end if;
+            if Rep < 20 and then not Losing then
+               return False;
+            end if;
+            if Pers = 1 and then SR > 1.8 and then Factions (Me).Plan = 2 then
+               return False;
+            end if;
+            if Pers = 3 and then SR > 1.5 then
+               return False;
+            end if;
+            return True;
+         when 1 =>
+            if Locked and then not Losing then
+               return False;
+            end if;
+            if Prox > 0.6 then
+               return False;
+            end if;
+            if Pers = 0 then
+               return Losing and then Rep >= 30;
+            end if;
+            return Long_Float (Rep) + FF >= (if Pers = 2 then 35.0 else 40.0);
+         when 2 =>
+            if Locked or else Prox > 0.5 or else Has_Ally (Me) then
+               return False;
+            end if;
+            if Pers = 0 then
+               return Common_Enemy (Me, Other) and then Rep >= 65;
+            end if;
+            if Pers = 2 then
+               return Long_Float (Rep) + FF >= 55.0
+                 and then (Common_Enemy (Me, Other) or else Held >= 15);
+            end if;
+            return Common_Enemy (Me, Other) and then Rep >= 60;
+         when 3 =>
+            if Locked or else Pers = 0 then
+               return False;
+            end if;
+            if Pers = 2 then
+               return Long_Float (Rep) + FF >= 45.0;
+            end if;
+            if Pers = 1 then
+               return Rep >= 55;
+            end if;
+            return Rep >= 60;
+         when 4 =>
+            declare
+               Tot : constant Integer := Amt * 10;
+               Buyer_Is_Me : constant Boolean := not Buy;
+               Rich : constant Boolean :=
+                 Factions (Other).Credits >= (Econ_Target * 2) / 5
+                 or else Factions (Me).Credits >= (Econ_Target * 2) / 5;
+            begin
+               if Locked or else Rich then
+                  return False;
+               end if;
+               if not Buyer_Is_Me then
+                  declare
+                     Want : Integer;
+                  begin
+                     if Prox > 0.6 then
+                        return False;
+                     end if;
+                     declare
+                        Mult : Long_Float := 1.0;
+                     begin
+                        if Pers = 3 then
+                           Mult := 0.75;
+                        elsif Pers = 0 then
+                           Mult := 1.15;
+                        elsif Pers = 2 then
+                           Mult := 0.95;
+                        elsif Energy then
+                           Mult := 1.3;
+                        end if;
+                        Want := JS_Round (Long_Float (Tot) * 1.5 * Mult);
+                     end;
+                     return Price >= Want;
+                  end;
+               end if;
+               if Rep < 40 or else Factions (Me).Credits < Price then
+                  return False;
+               end if;
+               declare
+                  Val : Long_Float := Long_Float (Tot);
+               begin
+                  if Energy then
+                     Val := Val * (if Pers = 1 then 2.2 elsif Pers = 3 then 1.3 else 1.5);
+                  else
+                     Val := Val * (if Pers = 0 then 1.9 else 1.5);
+                  end if;
+                  return Long_Float (Price) <= Val;
+               end;
+            end;
+         when others =>
+            return False;
+      end case;
+   end Consider;
+
+   procedure Apply_Deal (From, To, Kind : Integer; Buy, Energy : Boolean; Amt, Price : Integer) is
+      Buyer, Seller : Integer;
+   begin
+      if Kind = 0 then
+         Set_Rel (From, To, Rel_Cease);
+      elsif Kind = 1 then
+         if Rel (From, To) = Rel_Cease then
+            Rep_V (From) := Integer'Min (100, Rep_V (From) + 2);
+            Rep_V (To) := Integer'Min (100, Rep_V (To) + 2);
+         end if;
+         Set_Rel (From, To, Rel_Peace);
+      elsif Kind = 2 then
+         Set_Rel (From, To, Rel_Ally);
+      elsif Kind = 3 then
+         Open_B (From, To) := True;
+         Open_B (To, From) := True;
+      elsif Kind = 4 then
+         Buyer := (if Buy then From else To);
+         Seller := (if Buy then To else From);
+         Factions (Buyer).Credits := Factions (Buyer).Credits - Price;
+         Factions (Seller).Credits := Factions (Seller).Credits + Price;
+         for I in Contracts'Range loop
+            if not Contracts (I).Live then
+               Contracts (I) := (Live => True, Energy => Energy, Seller => Seller, Buyer => Buyer,
+                                 Amt => Amt, Left => 10, Price => Price);
+               exit;
+            end if;
+         end loop;
+      end if;
+      Log ("T" & Img (Turn_N) & " deal " & Img (Kind) & " between " & Img (From) & " and " & Img (To));
+   end Apply_Deal;
+
+   function Propose (From, To, Packed : Integer) return Boolean is
+      Kind : constant Integer := Packed mod 8;
+      Amt : constant Integer := (Packed / 8) mod 16;
+      Price : constant Integer := (Packed / 128) mod 4096;
+      Buy : constant Boolean := (Packed / 524288) mod 2 = 1;
+      Energy : constant Boolean := (Packed / 1048576) mod 2 = 1;
+      Why : constant String := Deal_OK (From, To, Kind, Buy, Energy, Amt, Price);
+   begin
+      if Why /= "" then
+         Set_Error (Why);
+         return False;
+      end if;
+      if not Factions (To).AI then
+         for I in Pending'Range loop
+            if not Pending (I).Live then
+               Pending (I) := (Live => True, Buy => Buy, Energy => Energy, Id => Next_Offer,
+                               From => From, To => To, Kind => Kind, Amt => Amt, Price => Price,
+                               Turn => Turn_N);
+               Next_Offer := Next_Offer + 1;
+               exit;
+            end if;
+         end loop;
+         Log ("T" & Img (Turn_N) & " offer sent");
+         return True;
+      end if;
+      if Consider (To, From, Kind, Buy, Energy, Amt, Price) then
+         Apply_Deal (From, To, Kind, Buy, Energy, Amt, Price);
+         Log ("T" & Img (Turn_N) & " " & Colony_Names.Faction_Name (Slot_Key (To)) & " accepts");
+      else
+         Log ("T" & Img (Turn_N) & " " & Colony_Names.Faction_Name (Slot_Key (To)) & " declines");
+      end if;
+      return True;
+   end Propose;
+
+   function Answer_Offer (Fid, Id : Integer; Take : Boolean) return Boolean is
+   begin
+      for I in Pending'Range loop
+         if Pending (I).Live and then Pending (I).Id = Id and then Pending (I).To = Fid then
+            if Take then
+               declare
+                  Why : constant String :=
+                    Deal_OK (Pending (I).From, Pending (I).To, Pending (I).Kind,
+                             Pending (I).Buy, Pending (I).Energy, Pending (I).Amt, Pending (I).Price);
+               begin
+                  if Why /= "" then
+                     Set_Error (Why);
+                     Pending (I).Live := False;
+                     return False;
+                  end if;
+               end;
+               Apply_Deal (Pending (I).From, Pending (I).To, Pending (I).Kind,
+                           Pending (I).Buy, Pending (I).Energy, Pending (I).Amt, Pending (I).Price);
+            end if;
+            Pending (I).Live := False;
+            return True;
+         end if;
+      end loop;
+      Set_Error ("No such offer");
+      return False;
+   end Answer_Offer;
+
+   function Offer_Waiting (From, To : Integer) return Boolean is
+   begin
+      for I in Pending'Range loop
+         if Pending (I).Live and then Pending (I).From = From and then Pending (I).To = To then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Offer_Waiting;
+
+   procedure AI_Diplomacy (Fid : Integer) is
+      Pers : constant Integer := Slot_Key (Fid);
+      Deal, Sent : Integer;
+      function Kind_Of (Packed : Integer) return Integer is (Packed mod 8);
+   begin
+      if (Turn_N + Fid) mod 2 /= 0 then
+         return;
+      end if;
+      Sent := 0;
+      for J in 0 .. Fac_N - 1 loop
+         exit when Sent >= 2;
+         if J /= Fid and then Factions (J).Alive and then Contact (Fid, J)
+           and then not Offer_Waiting (Fid, J)
+         then
+            Deal := -1;
+            if Rel (Fid, J) = Rel_War and then Turn_N >= 8 and then Turn_N - Since (Fid, J) >= 3
+              and then Victory_Progress (J) <= 0.6
+            then
+               if Pers = 2
+                 or else Pers = 1
+                 or else (Pers = 3 and then Strength_Of (Fid, J) < 1.3)
+                 or else (Pers = 0 and then Strength_Of (Fid, J) < 0.7)
+               then
+                  if Pers = 0 or else Rep_V (J) >= 20 then
+                     Deal := 0;
+                  end if;
+               end if;
+            elsif Rel (Fid, J) = Rel_Cease and then Turn_N - Since (Fid, J) >= 4
+              and then Rep_V (J) >= 40 and then Victory_Progress (J) < 0.6
+              and then (Pers /= 0 or else Strength_Of (Fid, J) < 0.7)
+            then
+               Deal := 1;
+            elsif Rel (Fid, J) = Rel_Peace and then Turn_N - Since (Fid, J) >= 8
+              and then Lock_Until (J) <= Turn_N and then Victory_Progress (J) < 0.5
+              and then not Has_Ally (Fid)
+              and then ((Common_Enemy (Fid, J) and then Rep_V (J) >= 60
+                         and then (Pers /= 0 or else Rep_V (J) >= 65))
+                        or else (Pers = 2 and then Long_Float (Rep_V (J)) + Fungus_Friendly (J) >= 55.0
+                                 and then Turn_N - Since (Fid, J) >= 15))
+            then
+               Deal := 2;
+            elsif Rel (Fid, J) = Rel_Peace and then not Open_B (Fid, J)
+              and then (Pers = 2 or else Pers = 1) and then Rep_V (J) >= 50
+              and then Turn_N - Since (Fid, J) >= 2
+            then
+               Deal := 3;
+            end if;
+            if Deal < 0 and then Rel (Fid, J) /= Rel_War and then Lock_Until (J) <= Turn_N
+              and then Rep_V (J) >= 40
+              and then Factions (Fid).Credits < (Econ_Target * 2) / 5
+              and then Factions (J).Credits < (Econ_Target * 2) / 5
+              and then (Turn_N + J) mod 6 < 2
+            then
+               if Pers = 1 and then Factions (Fid).Credits >= 70 then
+                  Deal := 4 + (3 * 8) + (48 * 128) + 524288 + 1048576;
+               elsif Pers = 3 and then Factions (J).Credits >= 60 and then Victory_Progress (J) < 0.6 then
+                  Deal := 4 + (2 * 8) + (23 * 128);
+               elsif Pers = 0 and then Factions (Fid).Credits >= 80
+                 and then Has_Tech (Fid, Tech_Kind'Pos (Kinetic))
+               then
+                  Deal := 4 + (3 * 8) + (45 * 128) + 524288;
+               end if;
+            end if;
+            if Deal >= 0 and then Turn_N - Ask (Fid, J, Kind_Of (Deal)) >= 6
+              and then Deal_OK (Fid, J, Kind_Of (Deal), (Deal / 524288) mod 2 = 1,
+                                (Deal / 1048576) mod 2 = 1, (Deal / 8) mod 16,
+                                (Deal / 128) mod 4096) = ""
+            then
+               Ask (Fid, J, Kind_Of (Deal)) := Turn_N;
+               if Propose (Fid, J, Deal) then
+                  Sent := Sent + 1;
+               end if;
+            end if;
+         end if;
+      end loop;
+   end AI_Diplomacy;
+
+   procedure Diplo_Turn is
+   begin
+      for A in 0 .. Fac_N - 1 loop
+         if Factions (A).Alive then
+            for B in A + 1 .. Fac_N - 1 loop
+               if Factions (B).Alive and then not Contact (A, B) then
+                  declare
+                     Seen : Boolean := False;
+                  begin
+                     for C in 0 .. City_N - 1 loop
+                        if (Cities (C).Fac = B and then Factions (A).Vis (Cities (C).Loc))
+                          or else (Cities (C).Fac = A and then Factions (B).Vis (Cities (C).Loc))
+                        then
+                           Seen := True;
+                        end if;
+                     end loop;
+                     for U in 0 .. Unit_N - 1 loop
+                        if (Units (U).Fac = B and then Factions (A).Vis (Units (U).Loc))
+                          or else (Units (U).Fac = A and then Factions (B).Vis (Units (U).Loc))
+                        then
+                           Seen := True;
+                        end if;
+                     end loop;
+                     if Seen then
+                        Contact (A, B) := True;
+                        Contact (B, A) := True;
+                        Log ("T" & Img (Turn_N) & " contact");
+                     end if;
+                  end;
+               end if;
+               if Rel (A, B) = Rel_Cease and then Turn_N - Since (A, B) >= 15 then
+                  Set_Rel (A, B, Rel_War);
+                  Log ("T" & Img (Turn_N) & " ceasefire expired");
+               end if;
+            end loop;
+         end if;
+      end loop;
+      for I in Contracts'Range loop
+         if Contracts (I).Live then
+            if not Factions (Contracts (I).Seller).Alive or else not Factions (Contracts (I).Buyer).Alive then
+               Contracts (I).Live := False;
+            else
+               if Contracts (I).Energy then
+                  declare
+                     G : constant Integer :=
+                       Integer'Min (Contracts (I).Amt, Integer'Max (0, Factions (Contracts (I).Seller).RP));
+                  begin
+                     Factions (Contracts (I).Seller).RP := Factions (Contracts (I).Seller).RP - G;
+                     Factions (Contracts (I).Buyer).RP := Factions (Contracts (I).Buyer).RP + Contracts (I).Amt;
+                  end;
+               else
+                  for C in 0 .. City_N - 1 loop
+                     if Cities (C).Fac = Contracts (I).Seller and then Cities (C).Capital then
+                        Cities (C).Prod := Integer'Max (0, Cities (C).Prod - Contracts (I).Amt);
+                     elsif Cities (C).Fac = Contracts (I).Buyer and then Cities (C).Capital then
+                        Cities (C).Prod := Cities (C).Prod + Contracts (I).Amt;
+                     end if;
+                  end loop;
+               end if;
+               Contracts (I).Left := Contracts (I).Left - 1;
+               if Contracts (I).Left <= 0 then
+                  Rep_V (Contracts (I).Seller) := Integer'Min (100, Rep_V (Contracts (I).Seller) + 1);
+                  Contracts (I).Live := False;
+                  Log ("T" & Img (Turn_N) & " trade contract honoured");
+               end if;
+            end if;
+         end if;
+      end loop;
+      for I in Pending'Range loop
+         if Pending (I).Live and then Turn_N - Pending (I).Turn >= 1 then
+            Pending (I).Live := False;
+            Log ("T" & Img (Turn_N) & " offer expired");
+         end if;
+      end loop;
+   end Diplo_Turn;
+
+   function Hostile_Near (Tile, Fid : Integer) return Integer is
+   begin
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac >= 0 and then Units (U).Fac /= Fid and then U_Atk (Units (U).Kind) > 0
+           and then At_War (Fid, Units (U).Fac) and then Dist (Units (U).Loc, Tile) <= 1
+           and then (Fid < 0 or else Factions (Fid).Vis (Units (U).Loc))
+         then
+            return U;
+         end if;
+      end loop;
+      return -1;
+   end Hostile_Near;
+
+   procedure Supply_Turn is
+      Sup : array (0 .. 3, 0 .. Max_Tiles - 1) of Boolean := (others => (others => False));
+      Host : array (0 .. Max_Tiles - 1) of Boolean := (others => False);
+      Nb : Nbr_Arr;
+      NN : Natural;
+      Q : array (0 .. Max_Tiles - 1) of Integer;
+      Qh, Qt, Cap_A, Cap_F : Integer;
+   begin
+      for F in 0 .. Fac_N - 1 loop
+         Host := (others => False);
+         for U in 0 .. Unit_N - 1 loop
+            if Units (U).Fac >= 0 and then Units (U).Fac /= F and then U_Atk (Units (U).Kind) > 0 then
+               Host (Units (U).Loc) := True;
+               Nbrs (Units (U).Loc, 1, NN, Nb);
+               for K in 0 .. NN - 1 loop
+                  Host (Nb (K)) := True;
+               end loop;
+            end if;
+         end loop;
+         Qt := 0;
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Tun = F and then not Tiles (I).Flooded then
+               declare
+                  C : constant Integer := City_At (I);
+                  Ent : Boolean := C >= 0 and then Cities (C).Fac = F;
+               begin
+                  if not Ent then
+                     for O in 0 .. City_N - 1 loop
+                        if Cities (O).Fac = F and then not Cities (O).UG and then Dist (Cities (O).Loc, I) <= 1 then
+                           Ent := True;
+                        end if;
+                     end loop;
+                  end if;
+                  if Ent and then not Host (I) then
+                     Sup (F, I) := True;
+                     Q (Qt) := I;
+                     Qt := Qt + 1;
+                  end if;
+               end;
+            end if;
+         end loop;
+         Qh := 0;
+         while Qh < Qt loop
+            Nbrs (Q (Qh), 1, NN, Nb);
+            Qh := Qh + 1;
+            for K in 0 .. NN - 1 loop
+               if not Sup (F, Nb (K)) and then Tiles (Nb (K)).Tun = F and then not Tiles (Nb (K)).Flooded then
+                  Sup (F, Nb (K)) := True;
+                  Q (Qt) := Nb (K);
+                  Qt := Qt + 1;
+               end if;
+            end loop;
+         end loop;
+      end loop;
+      declare
+         C : Integer := 0;
+         Dropped : Boolean;
+         procedure Clear_Holders (Loc, Fid : Integer) is
+            U : Integer := 0;
+         begin
+            while U < Unit_N loop
+               if Units (U).Loc = Loc and then Units (U).Fac = Fid then
+                  Remove_Unit (U);
+               else
+                  U := U + 1;
+               end if;
+            end loop;
+         end Clear_Holders;
+      begin
+      while C < City_N loop
+         Dropped := False;
+         if Cities (C).UG then
+            Cap_A := 3 + (if City_Has (C, Scrub) then 2 else 0);
+            Cap_F := (if City_Has (C, Hydro) then 16 else 8);
+            if not Cities (C).Res_Set then
+               Cities (C).Air := Cap_A;
+               Cities (C).Food_R := Cap_F;
+               Cities (C).Pow := 6;
+               Cities (C).Res_Set := True;
+            end if;
+            if Sup (Cities (C).Fac, Cities (C).Loc) then
+               Cities (C).Air := Integer'Min (Cap_A, Cities (C).Air + 2);
+               Cities (C).Food_R := Integer'Min (Cap_F, Cities (C).Food_R + 2);
+               Cities (C).Pow := Integer'Min (6, Cities (C).Pow + 2);
+               Cities (C).Cut := 0;
+               Cities (C).Air_Out := 0;
+               if Cities (C).Air > 1 and then Cities (C).Food_R > 1 and then Cities (C).Pow > 1 then
+                  Cities (C).Low := 0;
+               end if;
+            else
+               if Cities (C).Cut = 0 then
+                  Cities (C).Cut := 1;
+                  Log ("T" & Img (Turn_N) & " supply cut at " & Name_Of (Cities (C)));
+               end if;
+               if City_Has (C, Scrub) then
+                  if Turn_N mod 2 = 1 then
+                     Cities (C).Air := Integer'Max (0, Cities (C).Air - 1);
+                  end if;
+               else
+                  Cities (C).Air := Integer'Max (0, Cities (C).Air - 1);
+               end if;
+               if City_Has (C, Hydro) then
+                  if Turn_N mod 2 = 1 then
+                     Cities (C).Food_R := Integer'Max (0, Cities (C).Food_R - 1);
+                  end if;
+               else
+                  Cities (C).Food_R := Integer'Max (0, Cities (C).Food_R - 1);
+               end if;
+               Cities (C).Pow := Integer'Max (0, Cities (C).Pow - 1);
+               if Cities (C).Air <= 1 or else Cities (C).Food_R <= 1 or else Cities (C).Pow <= 1 then
+                  Cities (C).Low := 1;
+               end if;
+               if Cities (C).Air = 0 then
+                  Cities (C).Air_Out := Cities (C).Air_Out + 1;
+                  if Cities (C).Pop > 1 and then Cities (C).Air_Out < 2 then
+                     Cities (C).Pop := Cities (C).Pop - 1;
+                  end if;
+                  declare
+                     U : Integer := 0;
+                  begin
+                     while U < Unit_N loop
+                        if Units (U).Loc = Cities (C).Loc and then Units (U).Fac = Cities (C).Fac then
+                           Units (U).HP := Units (U).HP - 2;
+                           Units (U).No_Heal := True;
+                           if Units (U).HP <= 0 then
+                              Remove_Unit (U);
+                           else
+                              U := U + 1;
+                           end if;
+                        else
+                           U := U + 1;
+                        end if;
+                     end loop;
+                  end;
+               elsif Cities (C).Food_R = 0 and then Turn_N mod 2 = 0 and then Cities (C).Pop > 1 then
+                  Cities (C).Pop := Cities (C).Pop - 1;
+               end if;
+               if Cities (C).Pop < 1 or else Cities (C).Air_Out >= 2 then
+                  declare
+                     B : constant Integer := Hostile_Near (Cities (C).Loc, Cities (C).Fac);
+                     Old : constant Integer := Cities (C).Fac;
+                  begin
+                     Clear_Holders (Cities (C).Loc, Old);
+                     if B >= 0 and then Cities (C).Pop >= 1 then
+                        Cities (C).Fac := Units (B).Fac;
+                        Cities (C).Capital := False;
+                        Cities (C).Q_Len := 0;
+                        Cities (C).Prod := 0;
+                        Cities (C).Cut := 0;
+                        Cities (C).Low := 0;
+                        Cities (C).Air_Out := 0;
+                        Cities (C).Air := Cap_A;
+                        Cities (C).Food_R := Cap_F;
+                        Cities (C).Pow := 6;
+                        Log ("T" & Img (Turn_N) & " warren surrendered");
+                        Fix_Capital (Old);
+                     else
+                        Log ("T" & Img (Turn_N) & " warren abandoned");
+                        Remove_City (C);
+                        Dropped := True;
+                     end if;
+                  end;
+               end if;
+            end if;
+         end if;
+         if not Dropped then
+            C := C + 1;
+         end if;
+      end loop;
+      end;
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac >= 0 and then Tiles (Units (U).Loc).Tun = Units (U).Fac then
+            declare
+               C : constant Integer := City_At (Units (U).Loc);
+            begin
+               if not (C >= 0 and then not Cities (C).UG)
+                 and then not Sup (Units (U).Fac, Units (U).Loc)
+               then
+                  Units (U).No_Heal := True;
+                  if not (C >= 0 and then Cities (C).UG) then
+                     Units (U).HP := Integer'Max (1, Units (U).HP - 1);
+                  end if;
+               end if;
+            end;
+         end if;
+      end loop;
+   end Supply_Turn;
+
+   function Collapse_Tunnel (Fid, Tile : Integer) return String is
+      Hit : Integer := 0;
+   begin
+      if Tile < 0 or else Tile >= NTiles or else Tiles (Tile).Tun /= Fid then
+         Set_Error ("Not your tunnel");
+         return "Not your tunnel";
+      end if;
+      if City_At (Tile) >= 0 then
+         Set_Error ("Cannot collapse a base or city tile");
+         return "Cannot collapse a base or city tile";
+      end if;
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Loc = Tile and then Units (U).Fac = Fid then
+            Set_Error ("Your own units are in that tunnel");
+            return "Your own units are in that tunnel";
+         end if;
+      end loop;
+      declare
+         Near : Boolean := False;
+      begin
+         for U in 0 .. Unit_N - 1 loop
+            if Units (U).Fac = Fid and then Dist (Units (U).Loc, Tile) <= 2 then
+               Near := True;
+            end if;
+         end loop;
+         for C in 0 .. City_N - 1 loop
+            if Cities (C).Fac = Fid and then Dist (Cities (C).Loc, Tile) <= 3 then
+               Near := True;
+            end if;
+         end loop;
+         if not Near then
+            Set_Error ("No engineers nearby");
+            return "No engineers nearby";
+         end if;
+      end;
+      Tiles (Tile).Tun := -1;
+      Tiles (Tile).Flooded := False;
+      Tiles (Tile).Collapsed := True;
+      declare
+         U : Integer := 0;
+      begin
+         while U < Unit_N loop
+            if Units (U).Loc = Tile then
+               Units (U).HP := Units (U).HP - 5;
+               Hit := Hit + 1;
+               if Units (U).HP <= 0 then
+                  Remove_Unit (U);
+               else
+                  U := U + 1;
+               end if;
+            else
+               U := U + 1;
+            end if;
+         end loop;
+      end;
+      Log ("T" & Img (Turn_N) & " tunnel collapsed");
+      return "";
+   end Collapse_Tunnel;
+
+   procedure AI_Collapse (Fid : Integer) is
+      Nb, Near : Nbr_Arr;
+      NN, KN : Natural;
+      Own, Here, Breach : Boolean;
+   begin
+      for W in 0 .. City_N - 1 loop
+         if Cities (W).Fac = Fid and then Cities (W).UG then
+            Nbrs (Cities (W).Loc, 2, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if Tiles (Nb (K)).Tun = Fid and then City_At (Nb (K)) < 0 then
+                  Own := False;
+                  Here := False;
+                  for U in 0 .. Unit_N - 1 loop
+                     if Units (U).Loc = Nb (K) then
+                        if Units (U).Fac = Fid then
+                           Own := True;
+                        elsif Units (U).Fac >= 0 then
+                           Here := True;
+                        end if;
+                     end if;
+                  end loop;
+                  Breach := False;
+                  if not Own then
+                     Nbrs (Nb (K), 1, KN, Near);
+                     for P in 0 .. KN - 1 loop
+                        if Tiles (Near (P)).Tun >= 0 and then Tiles (Near (P)).Tun /= Fid then
+                           for U in 0 .. Unit_N - 1 loop
+                              if Units (U).Loc = Near (P) and then Units (U).Fac >= 0
+                                and then Units (U).Fac /= Fid and then U_Atk (Units (U).Kind) > 0
+                              then
+                                 Breach := True;
+                              end if;
+                           end loop;
+                        end if;
+                     end loop;
+                     if Here or else Breach then
+                        if Collapse_Tunnel (Fid, Nb (K)) = "" then
+                           return;
+                        end if;
+                     end if;
+                  end if;
+               end if;
+            end loop;
+         end if;
+      end loop;
+   end AI_Collapse;
+
+   function Can_Flood (Fid, Tile : Integer) return Boolean is
+      Nb : Nbr_Arr;
+      NN : Natural;
+      Water : Boolean := False;
+   begin
+      if Tile < 0 or else Tile >= NTiles or else Tiles (Tile).Tun < 0 or else Tiles (Tile).Flooded
+        or else City_At (Tile) >= 0
+      then
+         return False;
+      end if;
+      Nbrs (Tile, 1, NN, Nb);
+      for K in 0 .. NN - 1 loop
+         if not Tiles (Nb (K)).Land then
+            Water := True;
+         end if;
+      end loop;
+      return Water or else Has_Tech (Fid, Tech_Kind'Pos (Sapper));
+   end Can_Flood;
+
+   function Flood_Tunnel (Uidx, Tile : Integer) return Boolean is
+      Target : Integer := Tile;
+      Nb : Nbr_Arr;
+      NN : Natural;
+   begin
+      if Uidx < 0 then
+         Set_Error ("No such unit");
+         return False;
+      end if;
+      if Target < 0 then
+         if Can_Flood (Units (Uidx).Fac, Units (Uidx).Loc) then
+            Target := Units (Uidx).Loc;
+         else
+            Nbrs (Units (Uidx).Loc, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if Can_Flood (Units (Uidx).Fac, Nb (K)) and then Tiles (Nb (K)).Tun /= Units (Uidx).Fac then
+                  Target := Nb (K);
+                  exit;
+               end if;
+            end loop;
+            if Target < 0 then
+               for K in 0 .. NN - 1 loop
+                  if Can_Flood (Units (Uidx).Fac, Nb (K)) then
+                     Target := Nb (K);
+                     exit;
+                  end if;
+               end loop;
+            end if;
+         end if;
+      end if;
+      if Target < 0 then
+         Set_Error ("No floodable tunnel here (needs water next to it or Seismic Sapping)");
+         return False;
+      end if;
+      if Units (Uidx).MP <= 0 then
+         Set_Error ("No moves left");
+         return False;
+      end if;
+      if Dist (Units (Uidx).Loc, Target) > 1 then
+         Set_Error ("Too far");
+         return False;
+      end if;
+      if City_At (Target) >= 0 then
+         Set_Error ("Cannot flood a base");
+         return False;
+      end if;
+      if Tiles (Target).Tun < 0 then
+         Set_Error ("No tunnel there");
+         return False;
+      end if;
+      if Tiles (Target).Flooded then
+         Set_Error ("Already flooded");
+         return False;
+      end if;
+      if not Can_Flood (Units (Uidx).Fac, Target) then
+         Set_Error ("Needs water next to the tunnel, or Seismic Sapping");
+         return False;
+      end if;
+      Tiles (Target).Flooded := True;
+      Units (Uidx).MP := 0;
+      declare
+         U : Integer := 0;
+      begin
+         while U < Unit_N loop
+            if Units (U).Loc = Target and then U /= Uidx then
+               Units (U).HP := Units (U).HP - 3;
+               if Units (U).HP <= 0 then
+                  Remove_Unit (U);
+               else
+                  U := U + 1;
+               end if;
+            else
+               U := U + 1;
+            end if;
+         end loop;
+      end;
+      Log ("T" & Img (Turn_N) & " tunnel flooded");
+      return True;
+   end Flood_Tunnel;
+
+   function U_Bomb (K : Unit_Kind) return Boolean is
+     (K in Frigate | Cruiser);
+
+   function Bombard (Uidx, Tile : Integer) return Boolean is
+      C, Hits, Taken : Integer := 0;
+      A, D : Long_Float;
+      Had : Boolean;
+   begin
+      if Uidx < 0 or else not U_Bomb (Units (Uidx).Kind) then
+         Set_Error ("Only Frigates and Assault Cruisers can bombard");
+         return False;
+      end if;
+      if Units (Uidx).MP <= 0 then
+         Set_Error ("No moves left");
+         return False;
+      end if;
+      if Tiles (Units (Uidx).Loc).Land or else City_At (Units (Uidx).Loc) >= 0 then
+         Set_Error ("Must be at sea to bombard");
+         return False;
+      end if;
+      if Tile < 0 or else Dist (Units (Uidx).Loc, Tile) /= 1 then
+         Set_Error ("Target must be next to the ship");
+         return False;
+      end if;
+      C := City_At (Tile);
+      if C < 0 or else Cities (C).Fac = Units (Uidx).Fac then
+         Set_Error ("No enemy city or warren entrance next to the ship");
+         return False;
+      end if;
+      if Cities (C).Fac >= 0 and then not At_War (Units (Uidx).Fac, Cities (C).Fac) then
+         Set_Error ("Declare war first");
+         return False;
+      end if;
+      A := Att_Str (Uidx);
+      if Cities (C).UG and then not Has_Tech (Units (Uidx).Fac, Tech_Kind'Pos (Sapper)) then
+         A := A * 0.6;
+      end if;
+      Had := Best_Def (Tile, Uidx) >= 0;
+      Hits := 0;
+      Taken := 0;
+      for K in 1 .. 3 loop
+         declare
+            Tg : constant Integer := Best_Def (Tile, Uidx);
+         begin
+            if Tg >= 0 then
+               D := Def_Str (Tg, Uidx) * 0.7;
+            else
+               D := 2.0;
+            end if;
+            if Rand < A / (A + D) then
+               Hits := Hits + 1;
+               if Tg >= 0 then
+                  Units (Tg).HP := Integer'Max (1, Units (Tg).HP - (1 + RI (2)));
+               end if;
+            else
+               Taken := Taken + 1;
+               Units (Uidx).HP := Integer'Max (1, Units (Uidx).HP - 1);
+            end if;
+         end;
+      end loop;
+      if not Had and then Hits > 0 then
+         if Cities (C).Pop > 2 then
+            Cities (C).Pop := Cities (C).Pop - 1;
+         end if;
+         Cities (C).Prod := Cities (C).Prod / 2;
+      elsif Hits >= 2 then
+         Cities (C).Prod := Integer'Max (0, Cities (C).Prod - Hits * 3);
+      end if;
+      Units (Uidx).MP := 0;
+      Units (Uidx).Fort := False;
+      Last_Hits := Hits;
+      Log ("T" & Img (Turn_N) & " bombardment hits " & Img (Hits));
+      return True;
+   end Bombard;
+
    procedure End_Turn is
       Id : Integer;
       U : Integer;
@@ -2963,12 +4422,18 @@ package body Colony is
             Process_Faction (F);
          end if;
       end loop;
+      Diplo_Turn;
+      Supply_Turn;
       for Ix in 0 .. Unit_N - 1 loop
          if Units (Ix).Work /= W_None then
             Units (Ix).Work_Left := Units (Ix).Work_Left - 1;
             if Units (Ix).Work_Left <= 0 then
                case Units (Ix).Work is
-                  when W_Clear => Tiles (Units (Ix).Loc).Fungus := False;
+                  when W_Clear =>
+                     Tiles (Units (Ix).Loc).Fungus := False;
+                     if Units (Ix).Fac in 0 .. 3 then
+                        Fung_Cut (Units (Ix).Fac) := Fung_Cut (Units (Ix).Fac) + 1;
+                     end if;
                   when W_Road => Tiles (Units (Ix).Loc).Road := True;
                   when W_Farm =>
                      if not Tiles (Units (Ix).Loc).Fungus then
@@ -2982,6 +4447,11 @@ package body Colony is
                      if not Tiles (Units (Ix).Loc).Fungus then
                         Tiles (Units (Ix).Loc).Imp := Solar;
                      end if;
+                  when W_Tunnel =>
+                     Tiles (Units (Ix).Loc).Tun := Units (Ix).Fac;
+                     Tiles (Units (Ix).Loc).Flooded := False;
+                     Tiles (Units (Ix).Loc).Collapsed := False;
+                     Log ("T" & Img (Turn_N) & " tunnel dug");
                   when W_None => null;
                end case;
                Log ("T" & Img (Turn_N) & " terraforming finishes");
@@ -2995,10 +4465,14 @@ package body Colony is
             if C >= 0 and then Cities (C).Fac = Units (Ix).Fac then
                Heal := 3;
             end if;
-            if Units (Ix).HP < 10 and then Units (Ix).MP = U_Mv (Units (Ix).Kind) * 3 then
+            if not Units (Ix).No_Heal and then Units (Ix).HP < 10
+              and then Units (Ix).MP = U_Mv (Units (Ix).Kind) * 3
+            then
                Units (Ix).HP := Integer'Min (10, Units (Ix).HP + Heal);
             end if;
          end;
+         Units (Ix).No_Heal := False;
+         Units (Ix).Tn := 0;
          Units (Ix).MP := U_Mv (Units (Ix).Kind) * 3;
          Units (Ix).Skip := Units (Ix).Fort;
       end loop;
@@ -3021,7 +4495,7 @@ package body Colony is
       end loop;
    end End_Turn;
 
-   function Act (Code, A, B : Integer) return Integer is
+   function Act (Code, A, B : Integer; Extra : Integer := 0) return Integer is
       U, C : Integer;
       procedure Ok is
       begin
@@ -3186,8 +4660,52 @@ package body Colony is
             return 0;
          when Act_Terra =>
             U := Find_Unit (A);
-            if U < 0 or else Units (U).Kind /= Terraformer then
-               Set_Error ("Only terraformers");
+            if U < 0 then
+               Set_Error ("No such unit");
+               return 1;
+            end if;
+            if B = 6 then
+               if Units (U).Kind /= Burrower then
+                  Set_Error ("Only Burrowers dig tunnels");
+                  return 1;
+               end if;
+               if not Has_Tech (Units (U).Fac, Tech_Kind'Pos (Boring)) then
+                  Set_Error ("Requires Lithic Boring");
+                  return 1;
+               end if;
+               if not Tiles (Units (U).Loc).Land then
+                  Set_Error ("Cannot tunnel under the sea");
+                  return 1;
+               end if;
+               if Tiles (Units (U).Loc).Tun = Units (U).Fac and then not Tiles (Units (U).Loc).Flooded then
+                  Set_Error ("Tunnel already here");
+                  return 1;
+               end if;
+               declare
+                  CC : constant Integer := City_At (Units (U).Loc);
+               begin
+                  if CC >= 0 and then not Cities (CC).UG then
+                     Set_Error ("Cannot tunnel under a surface city");
+                     return 1;
+                  end if;
+               end;
+               Units (U).Work := W_Tunnel;
+               if Tiles (Units (U).Loc).Flooded then
+                  Units (U).Work_Left := 2;
+               elsif Tiles (Units (U).Loc).Rock = 2 or else Tiles (Units (U).Loc).Collapsed then
+                  Units (U).Work_Left := 3;
+               else
+                  Units (U).Work_Left := 2;
+               end if;
+               Units (U).MP := 0;
+               return 0;
+            end if;
+            if Units (U).Kind /= Terraformer then
+               if Units (U).Kind = Burrower then
+                  Set_Error ("Burrowers only dig tunnels and found warrens");
+               else
+                  Set_Error ("Only terraformers");
+               end if;
                return 1;
             end if;
             case B is
@@ -3231,6 +4749,51 @@ package body Colony is
             Human := -1;
             Viewer := -1;
             Log ("T" & Img (Turn_N) & " all factions are AI-controlled");
+            return 0;
+         when Act_Bombard =>
+            U := Find_Unit (A);
+            if U < 0 then
+               Set_Error ("No such unit");
+               return 1;
+            end if;
+            if not Bombard (U, B) then
+               return 1;
+            end if;
+            return 0;
+         when Act_Collapse =>
+            if Collapse_Tunnel (A, B) /= "" then
+               return 1;
+            end if;
+            return 0;
+         when Act_Flood =>
+            U := Find_Unit (A);
+            if U < 0 then
+               Set_Error ("No such unit");
+               return 1;
+            end if;
+            if not Flood_Tunnel (U, B) then
+               return 1;
+            end if;
+            return 0;
+         when Act_Propose =>
+            if not Propose (A, B, Extra) then
+               return 1;
+            end if;
+            return 0;
+         when Act_Answer =>
+            if not Answer_Offer (A, B, Extra /= 0) then
+               return 1;
+            end if;
+            return 0;
+         when Act_War =>
+            declare
+               Why : constant String := Declare_War (A, B);
+            begin
+               if Why /= "" then
+                  Set_Error (Why);
+                  return 1;
+               end if;
+            end;
             return 0;
          when Act_Policy =>
             if Human < 0 then
@@ -3387,6 +4950,9 @@ package body Colony is
          Tiles (I).Elev := 0;
          Tiles (I).Imp := None;
          Tiles (I).Sea_Dist := 99;
+         Tiles (I).Tun := -1;
+         Tiles (I).Flooded := False;
+         Tiles (I).Collapsed := False;
          Tiles (I).Land := Work_E (I) > Thr;
          if Tiles (I).Land then
             Rel := (Work_E (I) - Thr) / (if Top = Thr then 1.0 else Top - Thr);
@@ -3590,6 +5156,17 @@ package body Colony is
       ELen := 0;
       Last_Status := 0;
       Asc_On := False;
+      Rel := (others => (others => Rel_War));
+      Since := (others => (others => 0));
+      Open_B := (others => (others => False));
+      Contact := (others => (others => False));
+      Rep_V := (others => 50);
+      Lock_Until := (others => 0);
+      Fung_Cut := (others => 0);
+      Contracts := (others => <>);
+      Pending := (others => <>);
+      Next_Offer := 1;
+      Ask := (others => (others => (others => -100)));
       Asc_Fac := -1;
       Asc_City := -1;
       Asc_Left := 0;
@@ -3747,7 +5324,8 @@ package body Colony is
    begin
       RLen := 0;
       Add_R (Tag);
-      Add_R (" ok=");
+      Add_R (if Code = 0 then " status=pass" else " status=fail");
+      Add_R (" code=");
       Add_R (Img (Code));
       Add_R (" turn=");
       Add_R (Img (Turn_N));
@@ -3783,7 +5361,7 @@ package body Colony is
          end if;
          Add_R (Img (Factions (F).Tech_N));
       end loop;
-      if ELen > 0 then
+      if Code /= 0 and then ELen > 0 then
          Add_R (" err=");
          for I in 1 .. ELen loop
             if EBuf (I) = ' ' then
@@ -3978,6 +5556,15 @@ package body Colony is
             Wrd := Wrd or Interfaces.Shift_Left (U32 (Tiles (I).Elev), 9);
             if Terr (I) >= 0 then
                Wrd := Wrd or Interfaces.Shift_Left (U32 (Terr (I) + 1), 16);
+            end if;
+            if Tiles (I).Tun >= 0 then
+               Wrd := Wrd or Interfaces.Shift_Left (U32 (Tiles (I).Tun + 1), 20);
+            end if;
+            if Tiles (I).Flooded then
+               Wrd := Wrd or Interfaces.Shift_Left (U32'(1), 23);
+            end if;
+            if Tiles (I).Collapsed then
+               Wrd := Wrd or Interfaces.Shift_Left (U32'(1), 24);
             end if;
             Put (To_Int (Wrd));
          end;
@@ -4209,6 +5796,447 @@ package body Colony is
       return Code;
    end Run_Manual_Check;
 
+   function UImg (V : U32) return String is
+      Digs : String (1 .. 12);
+      N : Natural := 0;
+      X : U32 := V;
+      R : String (1 .. 12);
+   begin
+      if X = 0 then
+         return "0";
+      end if;
+      while X > 0 loop
+         N := N + 1;
+         Digs (N) := Character'Val (Character'Pos ('0') + Integer (X mod 10));
+         X := X / 10;
+      end loop;
+      for I in 1 .. N loop
+         R (I) := Digs (N - I + 1);
+      end loop;
+      return R (1 .. N);
+   end UImg;
+
+   function Run_Mechanics_Check return Integer is
+      function Rocky return Integer is
+      begin
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Land and then X_Of (I) > 2 and then Y_Of (I) > 2
+              and then (Tiles (I).Rock = 2 or else Tiles (I).Elev > 60)
+            then
+               return I;
+            end if;
+         end loop;
+         return -1;
+      end Rocky;
+
+      function Coastal_Land return Integer is
+         Nb : Nbr_Arr;
+         NN : Natural;
+      begin
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Land then
+               Nbrs (I, 1, NN, Nb);
+               for K in 0 .. NN - 1 loop
+                  if not Tiles (Nb (K)).Land then
+                     return I;
+                  end if;
+               end loop;
+            end if;
+         end loop;
+         return -1;
+      end Coastal_Land;
+
+      function First_Sea (Around : Integer) return Integer is
+         Nb : Nbr_Arr;
+         NN : Natural;
+      begin
+         Nbrs (Around, 1, NN, Nb);
+         for K in 0 .. NN - 1 loop
+            if not Tiles (Nb (K)).Land then
+               return Nb (K);
+            end if;
+         end loop;
+         return -1;
+      end First_Sea;
+
+      procedure Grant (Fid, Tech : Integer) is
+      begin
+         if not Has_Tech (Fid, Tech) then
+            Factions (Fid).Techs (Tech_Kind'Val (Tech)) := True;
+            Factions (Fid).Tech_N := Factions (Fid).Tech_N + 1;
+         end if;
+      end Grant;
+
+      Site, U, C, Sea, Foe, Own, Ship, Id : Integer;
+      Code : Integer := 0;
+      Air, Food, Pow, Cut, Pop, Col_Hp, Flood_Hp : Integer := -1;
+      Iron_Cease, Verdant_Cease, Peace_Rel, Trade_Ok : Integer := -1;
+      Sell_Cr, Buy_Cr, B_Hits, B_Hp, B_Pop, B_Prod : Integer := -1;
+      Rs_After : U32 := 0;
+      Collapsed : Integer := 0;
+      Flooded : Integer := 0;
+      Dig, Far, Aflood, Ally, Ob, Tlo, Thi, Surr, Leftu : Integer := -1;
+   begin
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) /= 0 then
+         Code := 1;
+      else
+         Site := Rocky;
+         Grant (0, Tech_Kind'Pos (Boring));
+         U := Make_Unit (0, Burrower, Site);
+         if Site < 0 or else U < 0 or else not Found_City (U) then
+            Code := 2;
+         else
+            C := City_N - 1;
+            declare
+               Nb : Nbr_Arr;
+               NN : Natural;
+            begin
+               Nbrs (Cities (C).Loc, 1, NN, Nb);
+               if NN = 0 or else Make_Unit (1, Lancer, Nb (0)) < 0 then
+                  Code := 2;
+               else
+                  Update_Seen (0);
+                  Supply_Turn;
+                  Supply_Turn;
+                  Supply_Turn;
+                  Air := Cities (C).Air;
+                  Food := Cities (C).Food_R;
+                  Pow := Cities (C).Pow;
+                  Cut := Cities (C).Cut;
+                  Pop := Cities (C).Pop;
+               end if;
+            end;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := -1;
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Land and then X_Of (I) > 2 and then Y_Of (I) > 2 then
+               Site := I;
+               exit;
+            end if;
+         end loop;
+         Tiles (Site).Tun := 0;
+         Foe := Make_Unit (1, Trooper, Site);
+         Id := Units (Foe).Id;
+         Units (Foe).HP := 8;
+         declare
+            Nb : Nbr_Arr;
+            NN : Natural;
+            Stand : Integer := Site;
+         begin
+            Nbrs (Site, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if Tiles (Nb (K)).Land and then Nb (K) /= Site then
+                  Stand := Nb (K);
+                  exit;
+               end if;
+            end loop;
+            Own := Make_Unit (0, Scout, Stand);
+            if Own < 0 or else Collapse_Tunnel (0, Site) /= "" then
+               Code := 3;
+            else
+               Foe := Find_Unit (Id);
+               Col_Hp := (if Foe < 0 then 0 else Units (Foe).HP);
+               Collapsed := (if Tiles (Site).Collapsed then 1 else 0);
+            end if;
+         end;
+      else
+         Code := 3;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := Coastal_Land;
+         if Site < 0 then
+            Code := 4;
+         else
+            declare
+               Nb : Nbr_Arr;
+               NN : Natural;
+               Stand : Integer := -1;
+            begin
+               Nbrs (Site, 1, NN, Nb);
+               for K in 0 .. NN - 1 loop
+                  if Tiles (Nb (K)).Land then
+                     Stand := Nb (K);
+                     exit;
+                  end if;
+               end loop;
+               Tiles (Site).Tun := 1;
+               Foe := Make_Unit (1, Trooper, Site);
+               Id := Units (Foe).Id;
+               Units (Foe).HP := 6;
+               Own := Make_Unit (0, Scout, Stand);
+               if Own < 0 or else not Flood_Tunnel (Own, Site) then
+                  Code := 4;
+               else
+                  Foe := Find_Unit (Id);
+                  Flood_Hp := (if Foe < 0 then 0 else Units (Foe).HP);
+                  Flooded := (if Tiles (Site).Flooded then 1 else 0);
+               end if;
+            end;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := Coastal_Land;
+         U := Make_Unit (0, Colonist, Site);
+         if U < 0 or else not Found_City (U) then
+            Code := 5;
+         else
+            C := City_N - 1;
+            Sea := First_Sea (Cities (C).Loc);
+            Ship := Make_Unit (1, Frigate, Sea);
+            if Sea < 0 or else Ship < 0 or else not Bombard (Ship, Cities (C).Loc) then
+               Code := 5;
+            else
+               B_Hits := Last_Hits;
+               B_Hp := Units (Ship).HP;
+               B_Pop := Cities (C).Pop;
+               B_Prod := Cities (C).Prod;
+               Rs_After := RS;
+            end if;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Contact (0, 2) := True;
+         Contact (2, 0) := True;
+         Factions (0).AI := True;
+         Factions (2).AI := True;
+         if not Propose (2, 0, 0) then
+            Code := 6;
+         else
+            Iron_Cease := (if Rel (2, 0) = Rel_War then 0 else 1);
+         end if;
+         if Code = 0 and then not Propose (0, 2, 0) then
+            Code := 6;
+         else
+            Verdant_Cease := Rel_Code (0, 2);
+         end if;
+         if Code = 0 then
+            Since (0, 2) := Turn_N - 3;
+            Since (2, 0) := Turn_N - 3;
+            if not Propose (0, 2, 1) then
+               Code := 6;
+            else
+               Peace_Rel := Rel_Code (0, 2);
+            end if;
+         end if;
+         if Code = 0 then
+            Factions (2).Credits := 100;
+            if not Propose (0, 2, 4 + 2 * 8 + 23 * 128) then
+               Code := 6;
+            else
+               Trade_Ok := (if Rel (0, 2) = Rel_Peace then 1 else 0);
+               Sell_Cr := Factions (0).Credits;
+               Buy_Cr := Factions (2).Credits;
+               for I in Contracts'Range loop
+                  if Contracts (I).Live then
+                     Trade_Ok := 2;
+                  end if;
+               end loop;
+            end if;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := -1;
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Land and then X_Of (I) > 2 and then Y_Of (I) > 2 and then Tiles (I).Rock /= 2 then
+               Site := I;
+               exit;
+            end if;
+         end loop;
+         Grant (0, Tech_Kind'Pos (Boring));
+         U := Make_Unit (0, Burrower, Site);
+         if Site < 0 or else U < 0 or else Act (Act_Terra, Units (U).Id, 6) /= 0 then
+            Code := 7;
+         else
+            Dig := Units (U).Work_Left;
+         end if;
+         Far := 0;
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Land then
+               declare
+                  Clear : Boolean := True;
+               begin
+                  for V in 0 .. Unit_N - 1 loop
+                     if Dist (Units (V).Loc, I) <= 2 then
+                        Clear := False;
+                     end if;
+                  end loop;
+                  if Clear then
+                     Tiles (I).Tun := 0;
+                     if Collapse_Tunnel (0, I) /= "" then
+                        Far := 1;
+                     end if;
+                     exit;
+                  end if;
+               end;
+            end if;
+         end loop;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := Coastal_Land;
+         if Site >= 0 then
+            declare
+               Nb : Nbr_Arr;
+               NN : Natural;
+               Stand : Integer := -1;
+            begin
+               Nbrs (Site, 1, NN, Nb);
+               for K in 0 .. NN - 1 loop
+                  if Tiles (Nb (K)).Land then
+                     Stand := Nb (K);
+                     exit;
+                  end if;
+               end loop;
+               Tiles (Site).Tun := 1;
+               Own := Make_Unit (0, Scout, Stand);
+               if Own >= 0 and then Flood_Tunnel (Own, -1) and then Tiles (Site).Flooded then
+                  Aflood := 1;
+               else
+                  Aflood := 0;
+               end if;
+            end;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := Rocky;
+         Grant (0, Tech_Kind'Pos (Boring));
+         U := Make_Unit (0, Burrower, Site);
+         if Site < 0 or else U < 0 or else not Found_City (U) then
+            Code := 8;
+         else
+            C := City_N - 1;
+            Cities (C).Res_Set := True;
+            Cities (C).Air := 0;
+            Cities (C).Food_R := 8;
+            Cities (C).Pow := 6;
+            Cities (C).Air_Out := 1;
+            Cities (C).Pop := 1;
+            if Make_Unit (0, Trooper, Cities (C).Loc) < 0 then
+               Code := 8;
+            else
+               declare
+                  Nb : Nbr_Arr;
+                  NN : Natural;
+               begin
+                  Nbrs (Cities (C).Loc, 1, NN, Nb);
+                  if NN = 0 or else Make_Unit (1, Lancer, Nb (0)) < 0 then
+                     Code := 8;
+                  else
+                     Update_Seen (0);
+                     Supply_Turn;
+                     Surr := Cities (C).Fac;
+                     Leftu := 0;
+                     for V in 0 .. Unit_N - 1 loop
+                        if Units (V).Loc = Cities (C).Loc and then Units (V).Fac = 0 then
+                           Leftu := Leftu + 1;
+                        end if;
+                     end loop;
+                  end if;
+               end;
+            end if;
+         end if;
+      end if;
+
+      if Code = 0 and then New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Contact (0, 2) := True;
+         Contact (2, 0) := True;
+         Contact (0, 3) := True;
+         Contact (3, 0) := True;
+         Contact (2, 3) := True;
+         Contact (3, 2) := True;
+         for F in 0 .. 3 loop
+            Factions (F).AI := True;
+         end loop;
+         Set_Rel (0, 2, Rel_Peace);
+         Since (0, 2) := Turn_N - 8;
+         Since (2, 0) := Turn_N - 8;
+         Rep_V (0) := 70;
+         if not Propose (0, 2, 2) then
+            Code := 9;
+         else
+            Ally := Rel_Code (0, 2);
+         end if;
+         if Code = 0 then
+            Set_Rel (3, 2, Rel_Peace);
+            Rep_V (3) := 50;
+            if not Propose (3, 2, 3) then
+               Code := 9;
+            else
+               Ob := (if Open_B (3, 2) then 1 else 0);
+            end if;
+         end if;
+         if Code = 0 then
+            Set_Rel (0, 3, Rel_Peace);
+            Factions (0).Credits := 100;
+            Factions (3).Credits := 100;
+            Rep_V (0) := 50;
+            if not Propose (0, 3, 4 + 2 * 8 + 22 * 128 + 524288) then
+               Code := 9;
+            else
+               Tlo := 0;
+               for I in Contracts'Range loop
+                  if Contracts (I).Live then
+                     Tlo := 1;
+                  end if;
+               end loop;
+            end if;
+            if Code = 0 and then not Propose (0, 3, 4 + 2 * 8 + 23 * 128 + 524288) then
+               Code := 9;
+            else
+               Thi := 0;
+               for I in Contracts'Range loop
+                  if Contracts (I).Live then
+                     Thi := 1;
+                  end if;
+               end loop;
+            end if;
+         end if;
+      end if;
+
+      RLen := 0;
+      Add_R ("MECH ");
+      Add_R (if Code = 0 then "status=pass" else "status=fail");
+      Add_R (" code="); Add_R (Img (Code));
+      Add_R (" air="); Add_R (Img (Air));
+      Add_R (" food="); Add_R (Img (Food));
+      Add_R (" pow="); Add_R (Img (Pow));
+      Add_R (" cut="); Add_R (Img (Cut));
+      Add_R (" wpop="); Add_R (Img (Pop));
+      Add_R (" col_hp="); Add_R (Img (Col_Hp));
+      Add_R (" collapsed="); Add_R (Img (Collapsed));
+      Add_R (" flood_hp="); Add_R (Img (Flood_Hp));
+      Add_R (" flooded="); Add_R (Img (Flooded));
+      Add_R (" bomb_hits="); Add_R (Img (B_Hits));
+      Add_R (" bomb_hp="); Add_R (Img (B_Hp));
+      Add_R (" bomb_pop="); Add_R (Img (B_Pop));
+      Add_R (" bomb_prod="); Add_R (Img (B_Prod));
+      Add_R (" bomb_rs="); Add_R (UImg (Rs_After));
+      Add_R (" iron_cease="); Add_R (Img (Iron_Cease));
+      Add_R (" verdant_rel="); Add_R (Img (Verdant_Cease));
+      Add_R (" peace_rel="); Add_R (Img (Peace_Rel));
+      Add_R (" trade="); Add_R (Img (Trade_Ok));
+      Add_R (" sell_cr="); Add_R (Img (Sell_Cr));
+      Add_R (" buy_cr="); Add_R (Img (Buy_Cr));
+      Add_R (" dig="); Add_R (Img (Dig));
+      Add_R (" far="); Add_R (Img (Far));
+      Add_R (" aflood="); Add_R (Img (Aflood));
+      Add_R (" surr="); Add_R (Img (Surr));
+      Add_R (" leftu="); Add_R (Img (Leftu));
+      Add_R (" ally="); Add_R (Img (Ally));
+      Add_R (" ob="); Add_R (Img (Ob));
+      Add_R (" tlo="); Add_R (Img (Tlo));
+      Add_R (" thi="); Add_R (Img (Thi));
+      return Code;
+   end Run_Mechanics_Check;
+
    function C_Ready return Integer is (1);
 
    function C_New
@@ -4224,9 +6252,8 @@ package body Colony is
 
    function C_Act (Code, A, B, C : Integer) return Integer is
       R : Integer;
-      pragma Unreferenced (C);
    begin
-      R := Act (Code, A, B);
+      R := Act (Code, A, B, C);
       Build_Frame;
       return R;
    end C_Act;
@@ -4317,6 +6344,43 @@ package body Colony is
                when others => Copy_Text ("Steward");
             end case;
          when 20 => Copy_Text (Report);
+         when 21 =>
+            if Human < 0 or else A not in 0 .. Fac_N - 1 or else A = Human then
+               Copy_Text ("");
+            else
+               case Rel (Human, A) is
+                  when Rel_War => Copy_Text ("War");
+                  when Rel_Cease => Copy_Text ("Ceasefire");
+                  when Rel_Peace => Copy_Text ("Peace");
+                  when Rel_Ally => Copy_Text ("Alliance");
+               end case;
+            end if;
+         when 22 =>
+            declare
+               Found : Boolean := False;
+            begin
+               for I in Pending'Range loop
+                  if Pending (I).Live and then Pending (I).To = Human then
+                     Copy_Text (Img (Pending (I).Id) & " " & Img (Pending (I).Kind) & " "
+                                & Img (Pending (I).From) & " " & Img (Pending (I).Amt) & " "
+                                & Img (Pending (I).Price) & " "
+                                & (if Pending (I).Buy then "1" else "0") & " "
+                                & (if Pending (I).Energy then "1" else "0"));
+                     Found := True;
+                     exit;
+                  end if;
+               end loop;
+               if not Found then
+                  Copy_Text ("");
+               end if;
+            end;
+         when 23 =>
+            if A in 0 .. Fac_N - 1 then
+               Copy_Text (Img (Rep_V (A)) & " " & Img (Lock_Until (A)) & " "
+                          & (if Human >= 0 and then A /= Human and then Open_B (Human, A) then "1" else "0"));
+            else
+               Copy_Text ("");
+            end if;
          when others => Copy_Text ("");
       end case;
       return TLen;

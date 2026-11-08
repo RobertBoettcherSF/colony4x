@@ -15,7 +15,7 @@ try {
   process.exit(1);
 }
 const exp = instance.exports;
-if (typeof exp.c4x_check_watch !== "function" || !exp.memory) {
+if (typeof exp.c4x_check_watch !== "function" || typeof exp.c4x_check_mechanics !== "function" || !exp.memory) {
   console.error("Ada exports missing");
   process.exit(1);
 }
@@ -31,17 +31,16 @@ if (exp.c4x_ready() !== 1 || text(0) !== "ada-wasm") {
   process.exit(1);
 }
 
-const watch = exp.c4x_check_watch();
-const watchLine = text(20);
-console.log(watchLine);
-if (watch !== 0 || !watchLine.startsWith("WATCH ok=0")) {
-  console.error("watch check failed", watch);
-  process.exit(1);
+function expectPass(label, code, line) {
+  console.log(line);
+  // status=pass means every expectation held. status=fail is a mismatch.
+  // code=0 is only meaningful together with status=pass. A line that merely
+  // contains the digits 0 is not success.
+  if (code !== 0 || !line.includes("status=pass") || line.includes("status=fail")) {
+    console.error(label + " failed", code);
+    process.exit(1);
+  }
 }
-const manual = exp.c4x_check_manual();
-const manualLine = text(20);
-console.log(manualLine);
-if (manual !== 0 || !manualLine.startsWith("MANUAL ok=0")) {
-  console.error("manual check failed", manual);
-  process.exit(1);
-}
+expectPass("watch", exp.c4x_check_watch(), text(20));
+expectPass("manual", exp.c4x_check_manual(), text(20));
+expectPass("mechanics", exp.c4x_check_mechanics(), text(20));

@@ -51,7 +51,7 @@ print(f"rts archive {len(keep)} wasm members, skipped {len(members) - len(keep)}
 PY
 EXPORTS="c4x_ready c4x_new c4x_act c4x_frame c4x_frame_ptr c4x_text c4x_text_ptr \
 c4x_option_count c4x_option c4x_tech_state c4x_stat c4x_set_viewer \
-c4x_check_watch c4x_check_manual"
+c4x_check_watch c4x_check_manual c4x_check_mechanics"
 set --
 for E in $EXPORTS; do
   set -- "$@" "--export=$E"
@@ -71,5 +71,13 @@ if ! cmp -s obj/native-report.txt obj/wasm-report.txt; then
   exit 1
 fi
 echo "Native and WebAssembly reports match"
+node tools/js_mechanics.mjs > obj/js-mechanics.txt
+awk '/^MECH /' obj/native-report.txt > obj/native-mechanics.txt
+if ! cmp -s obj/js-mechanics.txt obj/native-mechanics.txt; then
+  echo "JavaScript reference and Ada mechanics differ"
+  diff -u obj/js-mechanics.txt obj/native-mechanics.txt || true
+  exit 1
+fi
+echo "JavaScript, native Ada, and WebAssembly mechanics match"
 python3 tools/embed.py obj/wasm/colony.wasm web/template.html index.html
 echo "Built index.html ($(wc -c < obj/wasm/colony.wasm) bytes of WebAssembly)"
