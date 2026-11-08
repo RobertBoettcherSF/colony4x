@@ -13,6 +13,8 @@ package Colony is
      with Export, Convention => C, External_Name => "c4x_check_manual";
    function Run_Mechanics_Check return Integer
      with Export, Convention => C, External_Name => "c4x_check_mechanics";
+   procedure Run_Trace (Turns, All_AI : Integer);
+   function Trace_Report return String;
    function Report return String;
 
    function C_Ready return Integer
@@ -66,9 +68,11 @@ package Colony is
    Act_Answer   : constant Integer := 21;
    Act_War      : constant Integer := 22;
 
-   --  Default rule bits match game.js DEFAULT_RULES:
+   --  Default rule bits. 911 is conquest, ascension, economic, dominion,
+   --  events, diplomatic and cooperative, with aggressive off:
    --  0 conquest, 1 ascension, 2 economic, 3 dominion, 4 full map,
-   --  5 accelerated, 6 slow research, 7 events, 8 diplomatic, 9 cooperative.
+   --  5 accelerated, 6 slow research, 7 events, 8 diplomatic,
+   --  9 cooperative, 10 aggressive rivals.
    Default_Rules : constant Integer := 911;
 
 end Colony;

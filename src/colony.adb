@@ -66,6 +66,12 @@ package body Colony is
       Work  : Work_Kind := W_None;
    end record;
 
+   type Mev_Rec is record
+      Live : Boolean := False;
+      V, Until_T : Integer := 0;
+   end record;
+   type Mev_Arr is array (0 .. 5) of Mev_Rec;
+
    type City_Rec is record
       Id, Fac, Loc, Pop, Food, Prod, Founded : Integer := 0;
       Name_Len : Natural := 0;
@@ -78,20 +84,21 @@ package body Colony is
       Air, Food_R, Pow, Cut, Low, Air_Out : Integer := 0;
       Mood     : Natural := 0;
       Mor10    : Integer := 30;
-      Mood_Add : Integer := 0;
-      Mood_Until : Integer := 0;
+      Mor_Set  : Boolean := False;
+      Mev      : Mev_Arr := (others => <>);
    end record;
 
    type Faction_Rec is record
-      Used, Alive, AI, Policy_Set : Boolean := False;
+      Used, Alive, AI, Policy_Set, Ns_On : Boolean := False;
       Keyi, Credits, RP, Research, Tech_N, Plan, Unrest, Start : Integer := 0;
+      Ns_Turn : Integer := -100;
       Labs : Long_Float := 0.5;
       WW   : Long_Float := 0.0;
       Techs : Tech_Set := (others => False);
       Pol   : Pol_Arr := (others => 0);
       Seen, Vis : Tile_Bools := (others => False);
       Mem : Tile_Bytes := (others => 0);
-      Built, Lost, Kills, Founded, Combats : Natural := 0;
+      Built, Lost, Lost_Att, Lost_Seen, Kills, Founded, Combats : Natural := 0;
    end record;
 
    W, H, NTiles, Unit_N, City_N, Fac_N : Integer := 0;
@@ -149,12 +156,22 @@ package body Colony is
    Dist_A, Prev_A : array (0 .. Max_Tiles - 1) of Integer;
    Occ_A : array (0 .. Max_Tiles - 1) of U8;
    Terr : array (0 .. Max_Tiles - 1) of Integer;
+   Lm_At : array (0 .. Max_Tiles - 1) of Integer := (others => -1);
+   Lm_Sz : array (0 .. 255) of Integer := (others => 0);
+   Big_Lm : Integer := 0;
+   Lm_Ready : Boolean := False;
+   March_Turn : Integer := -1;
+   March_Key : array (0 .. 3, 0 .. 3) of Integer := (others => (others => -2));
+   March_Prev : array (0 .. 3, 0 .. 3, 0 .. Max_Tiles - 1) of Integer :=
+     (others => (others => (others => -1)));
 
    RBuf : String (1 .. 2400);
    RLen : Natural := 0;
    EBuf : String (1 .. 180);
    ELen : Natural := 0;
    TBuf : String (1 .. 512);
+   Tr_Store : String (1 .. 20000);
+   Tr_Len : Natural := 0;
    TLen : Natural := 0;
    Frame : array (0 .. 262143) of U8;
    Frame_Len : Natural := 0;
@@ -255,8 +272,13 @@ package body Colony is
 
    function RI (N : Natural) return Natural is
       R : Natural;
+      Unused : Long_Float;
    begin
+      --  JavaScript ri(n) always draws a random number, even when n is 1.
       if N <= 1 then
+         if N = 1 then
+            Unused := Rand;
+         end if;
          return 0;
       end if;
       R := Natural (Long_Float'Floor (Rand * Long_Float (N)));
@@ -975,10 +997,19 @@ package body Colony is
       Nbrs (Cities (C).Loc, 2, NN, Nb);
       CN := 0;
       for K in 0 .. NN - 1 loop
-         if not Taken (Nb (K)) and then City_At (Nb (K)) < 0 then
-            Cand (CN) := Nb (K);
-            CN := CN + 1;
-         end if;
+         declare
+            Blocked : Boolean := False;
+         begin
+            for U in 0 .. Unit_N - 1 loop
+               if Units (U).Loc = Nb (K) and then Units (U).Fac /= Cities (C).Fac then
+                  Blocked := True;
+               end if;
+            end loop;
+            if not Taken (Nb (K)) and then City_At (Nb (K)) < 0 and then not Blocked then
+               Cand (CN) := Nb (K);
+               CN := CN + 1;
+            end if;
+         end;
       end loop;
       Cities (C).Work_N := 0;
       Yield3 (Cities (C).Loc, Cities (C).Fac, N, Mi, En);
@@ -1132,7 +1163,7 @@ package body Colony is
       Nb : Nbr_Arr;
       NN : Natural;
    begin
-      if C < 0 then
+      if C < 0 or else Cities (C).UG then
          return False;
       end if;
       if Cities (C).Sea then
@@ -1693,19 +1724,46 @@ package body Colony is
       return D (Ix);
    end Mor_Press;
 
+   procedure Mood_Event (C, V, Turns : Integer) is
+      Slot : Integer := -1;
+   begin
+      if C < 0 or else C >= City_N then
+         return;
+      end if;
+      for I in Cities (C).Mev'Range loop
+         if not Cities (C).Mev (I).Live then
+            Slot := I;
+            exit;
+         end if;
+      end loop;
+      if Slot < 0 then
+         for I in 0 .. 4 loop
+            Cities (C).Mev (I) := Cities (C).Mev (I + 1);
+         end loop;
+         Slot := 5;
+      end if;
+      Cities (C).Mev (Slot) := (Live => True, V => V, Until_T => Turn_N + Turns);
+   end Mood_Event;
+
    procedure Morale (C : Integer) is
       M : constant Mods := Policy (Cities (C).Fac);
       Pos, Neg, V : Long_Float := 0.0;
       NF : Integer := 0;
+      Ev : Integer := 0;
       Nb : Nbr_Arr;
       NN : Natural;
       G : Integer := 0;
       procedure Add (X : Long_Float) is
+         R : Long_Float;
       begin
-         if X > 0.0 then
-            Pos := Pos + X;
-         elsif X < 0.0 then
-            Neg := Neg - X;
+         if X = 0.0 then
+            return;
+         end if;
+         R := Long_Float (JS_Round (X * 100.0)) / 100.0;
+         if R > 0.0 then
+            Pos := Pos + R;
+         elsif R < 0.0 then
+            Neg := Neg - R;
          end if;
       end Add;
    begin
@@ -1721,16 +1779,18 @@ package body Colony is
       end if;
       Add (-Long_Float (Integer'Max (0, Cities (C).Pop - 5)) * 0.4);
       Add (-Long_Float (Integer'Max (0, Count_Cities (Cities (C).Fac) - 6)) * 0.25);
-      Nbrs (Cities (C).Loc, 2, NN, Nb);
-      for K in 0 .. NN - 1 loop
-         if Tiles (Nb (K)).Fungus then
-            NF := NF + 1;
+      if not Cities (C).UG then
+         Nbrs (Cities (C).Loc, 2, NN, Nb);
+         for K in 0 .. NN - 1 loop
+            if Tiles (Nb (K)).Fungus then
+               NF := NF + 1;
+            end if;
+         end loop;
+         if M.Fsoothe > 0.0 or else Slot_Key (Cities (C).Fac) = 2 then
+            Add (Long_Float'Min (1.0, Long_Float (NF) / 8.0));
+         else
+            Add (-Long_Float'Min (2.0, Long_Float (NF) / 5.0));
          end if;
-      end loop;
-      if M.Fsoothe > 0.0 or else Slot_Key (Cities (C).Fac) = 2 then
-         Add (Long_Float'Min (1.0, Long_Float (NF) / 8.0));
-      else
-         Add (-Long_Float'Min (2.0, Long_Float (NF) / 5.0));
       end if;
       Add (-Long_Float'Min (3.0, (Factions (Cities (C).Fac).WW / 3.0) * M.Ww));
       if M.Law > 0.0 then
@@ -1746,11 +1806,15 @@ package body Colony is
       if Factions (Cities (C).Fac).Unrest > 0 then
          Add (-2.0);
       end if;
-      if Cities (C).Mood_Until >= Turn_N then
-         Add (Long_Float (Cities (C).Mood_Add));
-      end if;
+      for I in Cities (C).Mev'Range loop
+         if Cities (C).Mev (I).Live and then Cities (C).Mev (I).Until_T >= Turn_N then
+            Ev := Ev + Cities (C).Mev (I).V;
+         end if;
+      end loop;
+      Add (Long_Float (Ev));
       V := Pos - Neg * Mor_Press (Cities (C).Fac);
       Cities (C).Mor10 := JS_Round (V * 10.0);
+      Cities (C).Mor_Set := True;
       if Cities (C).Mor10 >= 0 then
          Cities (C).Mood := 0;
       elsif Cities (C).Mor10 > -30 then
@@ -1758,6 +1822,11 @@ package body Colony is
       else
          Cities (C).Mood := 2;
       end if;
+      for I in Cities (C).Mev'Range loop
+         if Cities (C).Mev (I).Live and then Cities (C).Mev (I).Until_T < Turn_N then
+            Cities (C).Mev (I).Live := False;
+         end if;
+      end loop;
    end Morale;
 
    function Att_Str (U : Integer) return Long_Float is
@@ -1902,6 +1971,10 @@ package body Colony is
       end if;
       if Units (Loser).Fac >= 0 then
          Factions (Units (Loser).Fac).Lost := Factions (Units (Loser).Fac).Lost + 1;
+         if Loser = Att and then Units (Def).Fac >= 0 then
+            Factions (Units (Loser).Fac).Lost_Att :=
+              Factions (Units (Loser).Fac).Lost_Att + 1;
+         end if;
       end if;
       if Units (Wn).Fac >= 0 then
          Factions (Units (Wn).Fac).Kills := Factions (Units (Wn).Fac).Kills + 1;
@@ -1921,12 +1994,14 @@ package body Colony is
       C : Integer;
    begin
       for U in 0 .. Unit_N - 1 loop
-         if Units (U).Loc = I and then Units (U).Fac /= Fid and then Units (U).On_Ship < 0 then
+         if Units (U).Loc = I and then Units (U).Fac /= Fid and then Units (U).On_Ship < 0
+           and then At_War (Fid, Units (U).Fac)
+         then
             return True;
          end if;
       end loop;
       C := City_At (I);
-      return C >= 0 and then Cities (C).Fac /= Fid;
+      return C >= 0 and then Cities (C).Fac /= Fid and then At_War (Fid, Cities (C).Fac);
    end Enemy_At;
 
    function Step (Uidx, To : Integer) return Boolean is
@@ -2014,7 +2089,9 @@ package body Colony is
          declare
             CC : constant Integer := City_At (To);
          begin
-            if CC >= 0 and then not At_War (Units (U).Fac, Cities (CC).Fac) then
+            if CC >= 0 and then Cities (CC).Fac /= Units (U).Fac
+              and then not At_War (Units (U).Fac, Cities (CC).Fac)
+            then
                Block := Cities (CC).Fac;
             end if;
          end;
@@ -2125,9 +2202,6 @@ package body Colony is
          or else (Units (U).Fac >= 0 and then Policy (Units (U).Fac).F_Move > 0.0))
       then
          Cost := 6;
-      end if;
-      if U_Ship (Units (U).Kind) then
-         Cost := 1;
       end if;
       if Units (U).Fac >= 0 and then Tiles (From).Tun = Units (U).Fac
         and then Tiles (To).Tun = Units (U).Fac
@@ -2275,6 +2349,73 @@ package body Colony is
       end loop;
    end Move_Toward;
 
+   procedure March_To (Uidx, To : Integer) is
+      Fid, Slot, C, Id, U, Was_At : Integer;
+      Found : Boolean;
+   begin
+      if Uidx < 0 or else Uidx >= Unit_N or else To < 0 or else To >= NTiles then
+         return;
+      end if;
+      if Units (Uidx).MP <= 0 or else Units (Uidx).Loc = To then
+         return;
+      end if;
+      if U_Ship (Units (Uidx).Kind) or else Units (Uidx).On_Ship >= 0 then
+         Move_Toward (Uidx, To, 60);
+         return;
+      end if;
+      Fid := Units (Uidx).Fac;
+      if Fid not in 0 .. 3 then
+         Move_Toward (Uidx, To, 60);
+         return;
+      end if;
+      if March_Turn /= Turn_N then
+         March_Turn := Turn_N;
+         March_Key := (others => (others => -2));
+      end if;
+      Found := False;
+      Slot := 0;
+      for S in 0 .. 3 loop
+         if March_Key (Fid, S) = To then
+            Slot := S;
+            Found := True;
+            exit;
+         elsif March_Key (Fid, S) < 0 then
+            Slot := S;
+            exit;
+         end if;
+      end loop;
+      if not Found then
+         BFS (To, Fid, 60);
+         March_Key (Fid, Slot) := To;
+         for I in 0 .. NTiles - 1 loop
+            March_Prev (Fid, Slot, I) := Prev_A (I);
+         end loop;
+      end if;
+      if March_Prev (Fid, Slot, Units (Uidx).Loc) < 0 then
+         Move_Toward (Uidx, To, 60);
+         return;
+      end if;
+      C := March_Prev (Fid, Slot, Units (Uidx).Loc);
+      Id := Units (Uidx).Id;
+      while C >= 0 loop
+         U := Find_Unit (Id);
+         exit when U < 0 or else Units (U).MP <= 0;
+         if Enemy_At (C, Units (U).Fac) and then C /= To then
+            return;
+         end if;
+         Was_At := Units (U).Loc;
+         if not Step (U, C) then
+            return;
+         end if;
+         U := Find_Unit (Id);
+         if U < 0 or else Units (U).Loc = Was_At then
+            return;
+         end if;
+         exit when C = To;
+         C := March_Prev (Fid, Slot, C);
+      end loop;
+   end March_To;
+
    function Grace return Integer is
       Area : constant Integer := 48 * 32 - W * H;
       Small : Integer := 0;
@@ -2375,12 +2516,286 @@ package body Colony is
       return Best;
    end Best_Mil;
 
+   procedure Ensure_Landmass is
+      Next, Size, Qh, Qt : Integer;
+      Q : array (0 .. Max_Tiles - 1) of Integer;
+      Nb : Nbr_Arr;
+      NN : Natural;
+   begin
+      if Lm_Ready then
+         return;
+      end if;
+      Lm_At := (others => -1);
+      Big_Lm := 0;
+      Next := 0;
+      for I in 0 .. NTiles - 1 loop
+         if Tiles (I).Land and then Lm_At (I) < 0 and then Next < Lm_Sz'Length then
+            Size := 0;
+            Q (0) := I;
+            Qt := 1;
+            Qh := 0;
+            Lm_At (I) := Next;
+            while Qh < Qt loop
+               Size := Size + 1;
+               Nbrs (Q (Qh), 1, NN, Nb);
+               Qh := Qh + 1;
+               for K in 0 .. NN - 1 loop
+                  if Tiles (Nb (K)).Land and then Lm_At (Nb (K)) < 0 then
+                     Lm_At (Nb (K)) := Next;
+                     Q (Qt) := Nb (K);
+                     Qt := Qt + 1;
+                  end if;
+               end loop;
+            end loop;
+            Lm_Sz (Next) := Size;
+            if Size >= 30 then
+               Big_Lm := Big_Lm + 1;
+            end if;
+            Next := Next + 1;
+         end if;
+      end loop;
+      Lm_Ready := True;
+   end Ensure_Landmass;
+
+   function Need_Sea (Fid : Integer) return Boolean is
+      Ms : array (0 .. 255) of Boolean := (others => False);
+      Free : Integer := 0;
+      Foe, Any, V : Boolean := False;
+      I : Integer;
+   begin
+      Ensure_Landmass;
+      if Big_Lm < 2 then
+         return False;
+      end if;
+      if Factions (Fid).Ns_Turn + 8 > Turn_N then
+         return Factions (Fid).Ns_On;
+      end if;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = Fid and then not Cities (C).UG
+           and then Lm_At (Cities (C).Loc) in 0 .. 255
+         then
+            Ms (Lm_At (Cities (C).Loc)) := True;
+            Any := True;
+         end if;
+      end loop;
+      if Any then
+         I := 0;
+         while I < NTiles and then Free < 2 loop
+            if Lm_At (I) in 0 .. 255 and then Ms (Lm_At (I))
+              and then Site_Score (I, Fid, False) >= 0.0
+            then
+               Free := Free + 1;
+            end if;
+            I := I + 2;
+         end loop;
+         for C in 0 .. City_N - 1 loop
+            if Cities (C).Fac /= Fid and then Cities (C).Fac >= 0
+              and then (Lm_At (Cities (C).Loc) not in 0 .. 255
+                        or else not Ms (Lm_At (Cities (C).Loc)))
+            then
+               Foe := True;
+            end if;
+         end loop;
+         V := Free < 2 or else (Slot_Key (Fid) = 0 and then Foe and then Turn_N > 60);
+      end if;
+      Factions (Fid).Ns_Turn := Turn_N;
+      Factions (Fid).Ns_On := V;
+      return V;
+   end Need_Sea;
+
    procedure AI_City (C : Integer) is
       Fid : constant Integer := Cities (C).Fac;
       Key : constant Integer := Slot_Key (Fid);
-      Gar, Cols, Mil, Terr_N : Integer := 0;
-      Target : Integer := 6;
       Plan : constant Integer := Factions (Fid).Plan;
+      Gar, Cols, Terr_N, Mil, Found_N, Wars, Burs, Tuns, NC : Integer := 0;
+      Target : Integer := 6;
+      procedure Pick (Code : Integer) is
+      begin
+         Cities (C).Queue (0) := Code;
+         Cities (C).Q_Len := 1;
+      end Pick;
+      function QN (Code : Integer) return Integer is
+         N : Integer := 0;
+      begin
+         for O in 0 .. City_N - 1 loop
+            if Cities (O).Fac = Fid then
+               for I in 0 .. Cities (O).Q_Len - 1 loop
+                  if Cities (O).Queue (I) = Code then
+                     N := N + 1;
+                  end if;
+               end loop;
+            end if;
+         end loop;
+         return N;
+      end QN;
+      function Ship_N (K : Unit_Kind) return Integer is
+         N : Integer := QN (Unit_Kind'Pos (K));
+      begin
+         for U in 0 .. Unit_N - 1 loop
+            if Units (U).Fac = Fid and then Units (U).Kind = K then
+               N := N + 1;
+            end if;
+         end loop;
+         return N;
+      end Ship_N;
+      function AI_Naval return Integer is
+         Has_D : constant Boolean := City_Has (C, Docks);
+         Islands : Boolean;
+         ND, NCC, WS, Waiters, Cap : Integer := 0;
+         Want : Long_Float;
+         War : Integer := -1;
+         function Fac_Code (K : Fac_Kind) return Integer is
+           (100 + Fac_Kind'Pos (K));
+      begin
+         if Cities (C).UG or else not Coastal (C) then
+            return -1;
+         end if;
+         Ensure_Landmass;
+         Islands := Big_Lm >= 2;
+         if (Cities (C).Sea or else Key = 2) and then Cities (C).Pop >= 3 then
+            for K in Fishery .. Tidal_C loop
+               if Can_Build (Fid, Fac_Code (K)) and then not City_Has (C, K)
+                 and then not Queue_Has (C, Fac_Code (K))
+                 and then Rand < (if Cities (C).Sea then 0.5 else 0.25)
+               then
+                  return Fac_Code (K);
+               end if;
+            end loop;
+         end if;
+         if not Has_D then
+            if not Can_Build (Fid, Fac_Code (Docks)) or else Cities (C).Pop < 2
+              or else Turn_N < 30
+            then
+               return -1;
+            end if;
+            ND := QN (Fac_Code (Docks));
+            NCC := 0;
+            for O in 0 .. City_N - 1 loop
+               if Cities (O).Fac = Fid then
+                  if City_Has (O, Docks) then
+                     ND := ND + 1;
+                  end if;
+                  if Coastal (O) then
+                     NCC := NCC + 1;
+                  end if;
+               end if;
+            end loop;
+            declare
+               Div : constant Integer := (if Key = 1 then 6 elsif Key = 2 then 3 else 4);
+            begin
+               Cap := (if ND = 0 then 1 else (NCC + Div - 1) / Div);
+            end;
+            if Need_Sea (Fid) then
+               Want := 0.9;
+            else
+               Want := (if Key = 1 then 0.2 elsif Key = 2 then 0.3 else 0.4);
+               if Islands then
+                  Want := Want * 1.6;
+               end if;
+            end if;
+            if ND < Cap and then Rand < Want then
+               return Fac_Code (Docks);
+            end if;
+            return -1;
+         end if;
+         if Can_Build (Fid, Unit_Kind'Pos (Cruiser)) then
+            War := Unit_Kind'Pos (Cruiser);
+         elsif Can_Build (Fid, Unit_Kind'Pos (Frigate)) then
+            War := Unit_Kind'Pos (Frigate);
+         end if;
+         Waiters := 0;
+         for U in 0 .. Unit_N - 1 loop
+            if Units (U).Fac = Fid and then Units (U).Want_Ship and then Units (U).On_Ship < 0 then
+               Waiters := Waiters + 1;
+            end if;
+         end loop;
+         if Waiters > 0 and then Ship_N (Transport) < (Waiters + 2) / 3 then
+            return Unit_Kind'Pos (Transport);
+         end if;
+         if Need_Sea (Fid) and then Cities (C).Pop >= 3
+           and then NC < (if Key = 3 then 12 else 9)
+           and then Cols + QN (Unit_Kind'Pos (Colonist)) < 2
+           and then Rand < 0.5
+         then
+            return Unit_Kind'Pos (Colonist);
+         end if;
+         if Need_Sea (Fid) and then Ship_N (Transport) < 1 and then Rand < 0.6 then
+            return Unit_Kind'Pos (Transport);
+         end if;
+         if Key = 1 and then Ship_N (Skiff) < 2 and then Rand < 0.35 then
+            return Unit_Kind'Pos (Skiff);
+         end if;
+         if Key = 3 and then Ship_N (Transport) < 1 + NC / 6 and then Rand < 0.35 then
+            return Unit_Kind'Pos (Transport);
+         end if;
+         if Key = 0 and then Islands
+           and then Ship_N (Transport) < 1 + (if Plan = 4 then 1 else 0)
+           and then Rand < 0.35
+         then
+            return Unit_Kind'Pos (Transport);
+         end if;
+         WS := 0;
+         for U in 0 .. Unit_N - 1 loop
+            if Units (U).Fac = Fid and then U_Bomb (Units (U).Kind) then
+               WS := WS + 1;
+            end if;
+         end loop;
+         WS := WS + QN (Unit_Kind'Pos (Frigate)) + QN (Unit_Kind'Pos (Cruiser));
+         NCC := 0;
+         for O in 0 .. City_N - 1 loop
+            if Cities (O).Fac = Fid and then Coastal (O) then
+               NCC := NCC + 1;
+            end if;
+         end loop;
+         if War >= 0 then
+            if Key = 0 and then WS < (NCC * (if Islands then 8 else 5) + 9) / 10
+              and then Rand < 0.35
+            then
+               return War;
+            end if;
+            if Key = 2 and then WS < (NCC + 1) / 2 and then Rand < 0.3 then
+               return War;
+            end if;
+            if Key = 3 and then WS < (Ship_N (Transport) + 1) / 2 and then Rand < 0.3 then
+               return War;
+            end if;
+            if Key = 1 and then WS < 1 and then Rand < 0.12 then
+               return War;
+            end if;
+         end if;
+         if Key /= 1 and then Ship_N (Skiff) < 1 and then Turn_N < 150 and then Rand < 0.15 then
+            return Unit_Kind'Pos (Skiff);
+         end if;
+         return -1;
+      end AI_Naval;
+      function Fac_Pick return Integer is
+         Order : constant array (0 .. 4) of Fac_Kind :=
+           (Spire, Hydro, Fab, Dome, Shield);
+         Ug_Order : constant array (0 .. 5) of Fac_Kind :=
+           (Scrub, Hydro, Spire, Fab, Dome, Shield);
+      begin
+         if Cities (C).UG then
+            for K of Ug_Order loop
+               if Can_Build (Fid, 100 + Fac_Kind'Pos (K)) and then not City_Has (C, K)
+                 and then (K /= Dome or else Cities (C).Pop >= 6)
+                 and then (K /= Hydro or else Cities (C).Pop >= 3)
+               then
+                  return 100 + Fac_Kind'Pos (K);
+               end if;
+            end loop;
+         else
+            for K of Order loop
+               if Can_Build (Fid, 100 + Fac_Kind'Pos (K)) and then not City_Has (C, K)
+                 and then (K /= Dome or else Cities (C).Pop >= 6)
+                 and then (K /= Hydro or else Cities (C).Pop >= 3)
+               then
+                  return 100 + Fac_Kind'Pos (K);
+               end if;
+            end loop;
+         end if;
+         return -1;
+      end Fac_Pick;
+      Nav, Calm : Integer;
    begin
       if Cities (C).Q_Len > 0 then
          return;
@@ -2388,126 +2803,205 @@ package body Colony is
       if Key = 3 then
          Target := 8;
       end if;
+      NC := Count_Cities (Fid);
       for U in 0 .. Unit_N - 1 loop
          if Units (U).Fac = Fid then
             if Units (U).Kind = Colonist then
                Cols := Cols + 1;
             end if;
+            if U_Found (Units (U).Kind) then
+               Found_N := Found_N + 1;
+            end if;
             if Units (U).Kind = Terraformer then
                Terr_N := Terr_N + 1;
             end if;
-            if not U_Civ (Units (U).Kind) and then not U_Ship (Units (U).Kind) then
+            if not U_Civ (Units (U).Kind) then
                Mil := Mil + 1;
-               if Units (U).Loc = Cities (C).Loc then
-                  Gar := Gar + 1;
-               end if;
+            end if;
+            if not U_Civ (Units (U).Kind) and then not U_Ship (Units (U).Kind)
+              and then Units (U).Loc = Cities (C).Loc
+            then
+               Gar := Gar + 1;
             end if;
          end if;
       end loop;
-      if Plan = 0 and then Cities (C).Pop >= 2
-        and then Count_Cities (Fid) < Target + 3
-        and then Cols < Integer'Max (1, (Count_Cities (Fid) + 1) / 2)
+      if Gar >= 1 and then Turn_N >= 10 then
+         if not Cities (C).Mor_Set then
+            Morale (C);
+         end if;
+         if Cities (C).Mor10 <= -30 then
+            if Can_Build (Fid, 100 + Fac_Kind'Pos (Rec)) and then not City_Has (C, Rec) then
+               Pick (100 + Fac_Kind'Pos (Rec));
+               return;
+            elsif Can_Build (Fid, 100 + Fac_Kind'Pos (Theatre)) and then not City_Has (C, Theatre) then
+               Pick (100 + Fac_Kind'Pos (Theatre));
+               return;
+            elsif Factions (Fid).Pol (2) = 3 and then Gar < 2 and then Cities (C).Mor10 < 0 then
+               Pick (Best_Mil (Fid, True));
+               return;
+            end if;
+         end if;
+      end if;
+      if Plan /= 4 and then Can_Build (Fid, Unit_Kind'Pos (Sea_Colonist))
+        and then Cities (C).Pop >= 3
       then
-         Cities (C).Queue (0) := Unit_Kind'Pos (Colonist);
-         Cities (C).Q_Len := 1;
-         return;
-      end if;
-      if Gar < 1 then
-         Cities (C).Queue (0) := Best_Mil (Fid, True);
-         Cities (C).Q_Len := 1;
-         return;
-      end if;
-      if not Cities (C).UG and then Can_Build (Fid, Unit_Kind'Pos (Burrower)) then
          declare
-            Wars, Burs, Tuns : Integer := 0;
+            Sea_U, Sea_N : Boolean := False;
+            Nb : Nbr_Arr;
+            NN : Natural;
          begin
-            for O in 0 .. City_N - 1 loop
-               if Cities (O).Fac = Fid and then Cities (O).UG then
-                  Wars := Wars + 1;
+            for U in 0 .. Unit_N - 1 loop
+               if Units (U).Fac = Fid and then Units (U).Kind = Sea_Colonist then
+                  Sea_U := True;
                end if;
             end loop;
-            for V in 0 .. Unit_N - 1 loop
-               if Units (V).Fac = Fid and then Units (V).Kind = Burrower then
-                  Burs := Burs + 1;
+            Nbrs (Cities (C).Loc, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if not Tiles (Nb (K)).Land then
+                  Sea_N := True;
                end if;
             end loop;
-            for I in 0 .. NTiles - 1 loop
-               if Tiles (I).Tun = Fid then
-                  Tuns := Tuns + 1;
-               end if;
-            end loop;
-            if Count_Cities (Fid) <= 2 and then Wars = 0 and then Burs = 0
-              and then Cities (C).Pop >= 2 and then Turn_N > 60 and then Rand < 0.6
-            then
-               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
-               Cities (C).Q_Len := 1;
-               return;
-            end if;
-            if Cities (C).Pop >= 3 and then Burs < 1 and then Count_Cities (Fid) >= 2
-              and then (Wars < 2 or else (Wars < 3 and then Key = 0)) and then Rand < 0.45
-            then
-               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
-               Cities (C).Q_Len := 1;
-               return;
-            end if;
-            if Wars >= 1 and then Burs < 1 and then Tuns < Wars * 6
-              and then Cities (C).Pop >= 3 and then Rand < 0.35
-            then
-               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
-               Cities (C).Q_Len := 1;
-               return;
-            end if;
-            if Key = 0 and then (Plan = 4 or else Plan = 2) and then War_Target (Fid) >= 0
-              and then Burs < 2 and then Cities (C).Pop >= 3 and then Rand < 0.4
-            then
-               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
-               Cities (C).Q_Len := 1;
+            if not Sea_U and then Sea_N and then Rand < 0.2 then
+               Pick (Unit_Kind'Pos (Sea_Colonist));
                return;
             end if;
          end;
       end if;
-      if Count_Cities (Fid) < Target and then Cities (C).Pop >= 2
-        and then Cols < (Count_Cities (Fid) + 1) / 2
-      then
-         Cities (C).Queue (0) := Unit_Kind'Pos (Colonist);
-         Cities (C).Q_Len := 1;
-         return;
-      end if;
-      if Terr_N < Count_Cities (Fid) then
-         Cities (C).Queue (0) := Unit_Kind'Pos (Terraformer);
-         Cities (C).Q_Len := 1;
-         return;
-      end if;
-      if Turn_N >= 10 and then Cities (C).Mor10 < 0 then
-         if Can_Build (Fid, 100 + Fac_Kind'Pos (Rec)) and then not City_Has (C, Rec) then
-            Cities (C).Queue (0) := 100 + Fac_Kind'Pos (Rec);
-            Cities (C).Q_Len := 1;
-            return;
-         elsif Can_Build (Fid, 100 + Fac_Kind'Pos (Theatre)) and then not City_Has (C, Theatre) then
-            Cities (C).Queue (0) := 100 + Fac_Kind'Pos (Theatre);
-            Cities (C).Q_Len := 1;
+      if Gar >= 1 and then Plan /= 0 then
+         Nav := AI_Naval;
+         if Nav >= 0 then
+            Pick (Nav);
             return;
          end if;
       end if;
-      if Mil < Count_Cities (Fid) * 2 then
-         Cities (C).Queue (0) := Best_Mil (Fid, Plan = 2);
-         Cities (C).Q_Len := 1;
-         return;
-      end if;
-      for K in Fac_Kind loop
-         if not F_Project (K) and then not F_Coast (K) and then K /= Scrub
-           and then Can_Build (Fid, 100 + Fac_Kind'Pos (K))
-           and then not City_Has (C, K)
-           and then (K /= Dome or else Cities (C).Pop >= 6)
-           and then (K /= Hydro or else Cities (C).Pop >= 3)
+      if Can_Build (Fid, Unit_Kind'Pos (Burrower)) and then not Cities (C).UG and then Gar >= 1 then
+         for O in 0 .. City_N - 1 loop
+            if Cities (O).Fac = Fid and then Cities (O).UG then
+               Wars := Wars + 1;
+            end if;
+         end loop;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = Fid and then Units (V).Kind = Burrower then
+               Burs := Burs + 1;
+            end if;
+         end loop;
+         for I in 0 .. NTiles - 1 loop
+            if Tiles (I).Tun = Fid then
+               Tuns := Tuns + 1;
+            end if;
+         end loop;
+         if NC <= 2 and then Wars = 0 and then Burs = 0 and then Cities (C).Pop >= 2
+           and then Turn_N > 60 and then Rand < 0.6
          then
-            Cities (C).Queue (0) := 100 + Fac_Kind'Pos (K);
-            Cities (C).Q_Len := 1;
+            Pick (Unit_Kind'Pos (Burrower));
             return;
          end if;
-      end loop;
-      Cities (C).Queue (0) := Best_Mil (Fid, False);
-      Cities (C).Q_Len := 1;
+         if Cities (C).Pop >= 3 and then Burs < 1 and then NC >= 2
+           and then (Wars < 2 or else (Wars < 3 and then Key = 0)) and then Rand < 0.45
+         then
+            Pick (Unit_Kind'Pos (Burrower));
+            return;
+         end if;
+         if Wars >= 1 and then Burs < 1 and then Tuns < Wars * 6 and then Cities (C).Pop >= 3
+           and then Rand < 0.35
+         then
+            Pick (Unit_Kind'Pos (Burrower));
+            return;
+         end if;
+         if Key = 0 and then (Plan = 4 or else Plan = 2) and then War_Target (Fid) >= 0
+           and then Burs < 2 and then Cities (C).Pop >= 3 and then Rand < 0.4
+         then
+            Pick (Unit_Kind'Pos (Burrower));
+            return;
+         end if;
+      end if;
+      if Plan = 0 and then Cities (C).Pop >= 2 and then NC < Target + 3
+        and then Found_N < Integer'Max (1, (NC + 1) / 2)
+      then
+         Pick (Unit_Kind'Pos (Colonist));
+         return;
+      end if;
+      if Plan = 2 or else Plan = 4 then
+         Pick (Best_Mil (Fid, Gar < 1));
+         return;
+      end if;
+      if Gar < 1 then
+         Pick (Best_Mil (Fid, True));
+         return;
+      end if;
+      if NC < Target and then Cities (C).Pop >= 2 and then Cols < (NC + 1) / 2 then
+         Pick (Unit_Kind'Pos (Colonist));
+         return;
+      end if;
+      if Terr_N < NC then
+         Pick (Unit_Kind'Pos (Terraformer));
+         return;
+      end if;
+      if Can_Build (Fid, Unit_Kind'Pos (Sea_Colonist)) and then Cities (C).Pop >= 3
+        and then NC < Target + 2
+      then
+         declare
+            Sea_U, Sea_N : Boolean := False;
+            Nb : Nbr_Arr;
+            NN : Natural;
+         begin
+            for U in 0 .. Unit_N - 1 loop
+               if Units (U).Fac = Fid and then Units (U).Kind = Sea_Colonist then
+                  Sea_U := True;
+               end if;
+            end loop;
+            Nbrs (Cities (C).Loc, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if not Tiles (Nb (K)).Land then
+                  Sea_N := True;
+               end if;
+            end loop;
+            if not Sea_U and then Sea_N and then Rand < 0.35 then
+               Pick (Unit_Kind'Pos (Sea_Colonist));
+               return;
+            end if;
+         end;
+      end if;
+      if Gar >= 1 and then Turn_N >= 10 then
+         if Cities (C).Mor10 < 0 or else (Cities (C).Mor10 < 10 and then Cities (C).Pop >= 6) then
+            if Can_Build (Fid, 100 + Fac_Kind'Pos (Rec)) and then not City_Has (C, Rec) then
+               Pick (100 + Fac_Kind'Pos (Rec));
+               return;
+            elsif Can_Build (Fid, 100 + Fac_Kind'Pos (Theatre)) and then not City_Has (C, Theatre) then
+               Pick (100 + Fac_Kind'Pos (Theatre));
+               return;
+            elsif Factions (Fid).Pol (2) = 3 and then Gar < 2 and then Cities (C).Mor10 < 0 then
+               Pick (Best_Mil (Fid, True));
+               return;
+            end if;
+         end if;
+      end if;
+      Calm := Fac_Pick;
+      if Key = 1 and then Calm >= 0 then
+         Pick (Calm);
+         return;
+      end if;
+      if Key = 0 and then Mil < NC * 3 then
+         Pick (Best_Mil (Fid, False));
+         return;
+      end if;
+      if Gar < 2 and then (Turn_N > 25 or else (Key = 1 and then Turn_N > 12)) then
+         Pick (Best_Mil (Fid, True));
+         return;
+      end if;
+      if Calm >= 0 then
+         Pick (Calm);
+         return;
+      end if;
+      if Mil < NC * 2 then
+         Pick (Best_Mil (Fid, False));
+         return;
+      end if;
+      if NC < Target + 3 and then Cities (C).Pop >= 3 then
+         Pick (Unit_Kind'Pos (Colonist));
+         return;
+      end if;
+      Pick (Best_Mil (Fid, Rand >= 0.5));
    end AI_City;
 
    function AI_Rush (U : Integer) return Boolean is
@@ -2979,7 +3473,16 @@ package body Colony is
                   Score : Long_Float;
                begin
                   if Own then
-                     Skip := not Cities (CI).Sea and then City_At (Home) >= 0 and then not Cities (City_At (Home)).Sea;
+                     Ensure_Landmass;
+                     declare
+                        HC : constant Integer := City_At (Home);
+                     begin
+                        Skip := HC >= 0
+                          and then Lm_At (Cities (CI).Loc) = Lm_At (Cities (HC).Loc)
+                          and then Lm_At (Cities (CI).Loc) >= 0
+                          and then not Cities (CI).Sea
+                          and then not Cities (HC).Sea;
+                     end;
                   else
                      Skip := Rel (Fid, Cities (CI).Fac) /= Rel_Peace
                        and then Rel (Fid, Cities (CI).Fac) /= Rel_Ally;
@@ -3307,6 +3810,17 @@ package body Colony is
                end loop;
                return False;
             end Taken;
+            function Terra_Taken (I : Integer) return Boolean is
+            begin
+               for O in 0 .. Unit_N - 1 loop
+                  if O /= U and then Units (O).Fac = Fid and then Units (O).Kind = Terraformer
+                    and then Units (O).Target = I
+                  then
+                     return True;
+                  end if;
+               end loop;
+               return False;
+            end Terra_Taken;
             function Worked (C, I : Integer) return Boolean is
             begin
                for Wk in 0 .. Cities (C).Work_N - 1 loop
@@ -3333,7 +3847,7 @@ package body Colony is
                         declare
                            I : constant Integer := (if K < 0 then Cities (C).Loc else Nb (K));
                         begin
-                           if Dist_A (I) >= 0 and then Job_Of (Fid, I) /= W_None and then not Taken (I) then
+                           if Dist_A (I) >= 0 and then Job_Of (Fid, I) /= W_None and then not Terra_Taken (I) then
                               Wgt := (if Worked (C, I) then 0 else 3);
                               if Dist_A (I) + Wgt < BD then
                                  BD := Dist_A (I) + Wgt;
@@ -3482,7 +3996,8 @@ package body Colony is
                end if;
             end;
          end if;
-         Agg := (Turn_N >= Grace and then (Slot_Key (Fid) = 0 or else Turn_N > 40))
+         Agg := ((Turn_N >= Grace or else Rule (10))
+                 and then (Rule (10) or else Slot_Key (Fid) = 0 or else Turn_N > 40))
            or else Units (U).Kind = Scout or else Factions (Fid).Plan = 4 or else Factions (Fid).Plan = 2;
          BFS (Units (U).Loc, Fid, (if Units (U).Kind = Scout then 8 else 16));
          Best := -1;
@@ -3534,7 +4049,7 @@ package body Colony is
                         Skip_Ug := CC >= 0 and then Cities (CC).UG and then U_Atk (Units (U).Kind) < 4
                           and then not Has_Tech (Fid, Tech_Kind'Pos (Sapper)) and then not Near_Tun;
                      if not Skip_Ug then
-                        if not (CC >= 0 and then Turn_N < Grace)
+                        if not (CC >= 0 and then Turn_N < Grace and then not Rule (10))
                           and then not (CC >= 0 and then Turn_N < JS_Round (Long_Float (Grace) * 0.6))
                         then
                            declare
@@ -3597,7 +4112,7 @@ package body Colony is
                   end loop;
                end if;
                if Tc >= 0 then
-                  Move_Toward (U, Tc, 60);
+                  March_To (U, Tc);
                   return;
                end if;
             end;
@@ -3673,6 +4188,7 @@ package body Colony is
       end if;
       Update_Seen (Fid);
       AI_Diplomacy (Fid);
+      Plan_Faction (Fid);
       if Turn_N >= 15 and then not Factions (Fid).Policy_Set then
          for Axis in 0 .. 3 loop
             Factions (Fid).Pol (Axis) := AI_Pol (Slot_Key (Fid), Axis);
@@ -3681,7 +4197,6 @@ package body Colony is
          Log ("T" & Img (Turn_N) & " " & Colony_Names.Faction_Name (Slot_Key (Fid))
               & " sets its policies");
       end if;
-      Plan_Faction (Fid);
       if Slot_Key (Fid) = 1 then
          Factions (Fid).Labs := 0.7;
       elsif Slot_Key (Fid) = 0 then
@@ -3733,32 +4248,52 @@ package body Colony is
       Cap : Integer;
       Nb : Nbr_Arr;
       NN : Natural;
-      Best, BD : Integer;
+      Best, BD, Beasts0, N0, U : Integer := 0;
+      Ids : array (0 .. Max_Units - 1) of Integer;
    begin
-      for U in 0 .. Unit_N - 1 loop
-         if Units (U).Fac < 0 and then Units (U).MP > 0 then
+      for I in 0 .. Unit_N - 1 loop
+         if Units (I).Fac < 0 then
+            Ids (Beasts0) := Units (I).Id;
+            Beasts0 := Beasts0 + 1;
+         end if;
+      end loop;
+      N0 := Beasts0;
+      for I in 0 .. N0 - 1 loop
+         U := Find_Unit (Ids (I));
+         if U >= 0 and then Units (U).MP > 0 then
+            BFS (Units (U).Loc, -1, 6);
             Best := -1;
             BD := 99;
-            for O in 0 .. Unit_N - 1 loop
-               if Units (O).Fac >= 0 and then Dist (Units (O).Loc, Units (U).Loc) in 1 .. 6
-                 and then Dist (Units (O).Loc, Units (U).Loc) < BD
-               then
-                  if not (Slot_Key (Units (O).Fac) = 2 and then (Units (O).Loc + Turn_N) mod 4 = 0) then
-                     BD := Dist (Units (O).Loc, Units (U).Loc);
-                     Best := Units (O).Loc;
-                  end if;
+            for I in 0 .. NTiles - 1 loop
+               if Dist_A (I) > 0 then
+                  declare
+                     Owner : Integer := -2;
+                     CC : constant Integer := City_At (I);
+                  begin
+                     if CC >= 0 and then Cities (CC).UG then
+                        null;
+                     else
+                        for O in 0 .. Unit_N - 1 loop
+                           if Units (O).Loc = I and then Units (O).Fac >= 0 then
+                              Owner := Units (O).Fac;
+                              exit;
+                           end if;
+                        end loop;
+                        if Owner < 0 and then CC >= 0 then
+                           Owner := Cities (CC).Fac;
+                        end if;
+                        if Owner >= 0
+                          and then not (Slot_Key (Owner) = 2 and then (I + Turn_N) mod 4 = 0)
+                          and then not (Policy (Owner).Calm > 0.0 and then (I + Turn_N) mod 2 = 0)
+                          and then Dist_A (I) < BD
+                        then
+                           BD := Dist_A (I);
+                           Best := I;
+                        end if;
+                     end if;
+                  end;
                end if;
             end loop;
-            if Best < 0 then
-               for C in 0 .. City_N - 1 loop
-                  if Dist (Cities (C).Loc, Units (U).Loc) in 1 .. 6
-                    and then Dist (Cities (C).Loc, Units (U).Loc) < BD
-                  then
-                     BD := Dist (Cities (C).Loc, Units (U).Loc);
-                     Best := Cities (C).Loc;
-                  end if;
-               end loop;
-            end if;
             if Best >= 0 then
                Move_Toward (U, Best, 6);
             else
@@ -3791,83 +4326,69 @@ package body Colony is
             end if;
          end if;
       end loop;
-      for K in 1 .. 3 loop
-         if Rand < 0.45 then
-            declare
-               Fung : array (0 .. Max_Tiles - 1) of Integer;
-               FN : Natural := 0;
-               S : Integer;
-            begin
-               for I in 0 .. NTiles - 1 loop
-                  if Tiles (I).Fungus then
-                     Fung (FN) := I;
-                     FN := FN + 1;
-                  end if;
-               end loop;
-               if FN > 0 then
-                  S := Fung (RI (FN));
-                  Nbrs (S, 1, NN, Nb);
-                  declare
-                     Choices : Nbr_Arr := (others => -1);
-                     CN : Natural := 0;
-                  begin
-                     for J in 0 .. NN - 1 loop
-                        if Tiles (Nb (J)).Land and then not Tiles (Nb (J)).Fungus
-                          and then Tiles (Nb (J)).Imp = None and then City_At (Nb (J)) < 0
-                        then
-                           Choices (CN) := Nb (J);
-                           CN := CN + 1;
-                        end if;
-                     end loop;
-                     if CN > 0 then
-                        Tiles (Choices (RI (CN))).Fungus := True;
-                     end if;
-                  end;
-               end if;
-            end;
-         end if;
-      end loop;
-      Cap := 1 + Integer (Long_Float'Floor (Long_Float (Turn_N) / 14.0 * Nat_Press));
       declare
-         Beasts : Integer := 0;
+         Fung : array (0 .. Max_Tiles - 1) of Integer;
          FN : Natural := 0;
+         S : Integer;
+         Beast_Mul : Long_Float := 1.0;
+         Beasts : Integer := 0;
       begin
-         for U in 0 .. Unit_N - 1 loop
-            if Units (U).Fac < 0 then
-               Beasts := Beasts + 1;
-            end if;
-         end loop;
          for I in 0 .. NTiles - 1 loop
             if Tiles (I).Fungus then
+               Fung (FN) := I;
                FN := FN + 1;
             end if;
          end loop;
-         if FN > 0 and then Beasts < Cap and then Rand < Long_Float'Min (0.6, Long_Float (FN) / 120.0 * Nat_Press) then
-            for Tries in 1 .. 8 loop
+         for K in 1 .. 3 loop
+            if FN > 0 and then Rand < 0.45 then
+               S := Fung (RI (FN));
+               Nbrs (S, 1, NN, Nb);
                declare
-                  I : constant Integer := RI (NTiles);
-                  Near : Boolean := False;
+                  Choices : Nbr_Arr := (others => -1);
+                  CN : Natural := 0;
                begin
-                  if Tiles (I).Fungus and then City_At (I) < 0 then
-                     for C in 0 .. City_N - 1 loop
-                        if Dist (Cities (C).Loc, I) <= 3 then
-                           Near := True;
-                        end if;
-                     end loop;
-                     for U in 0 .. Unit_N - 1 loop
-                        if Units (U).Loc = I then
-                           Near := True;
-                        end if;
-                     end loop;
-                     if not Near then
-                        if Make_Unit (-1, Beast, I) >= 0 then
-                           Log ("T" & Img (Turn_N) & " a Spore Beast emerges");
-                        end if;
-                        exit;
+                  for J in 0 .. NN - 1 loop
+                     if Tiles (Nb (J)).Land and then not Tiles (Nb (J)).Fungus
+                       and then Tiles (Nb (J)).Imp = None and then City_At (Nb (J)) < 0
+                     then
+                        Choices (CN) := Nb (J);
+                        CN := CN + 1;
                      end if;
+                  end loop;
+                  if CN > 0 then
+                     Tiles (Choices (RI (CN))).Fungus := True;
                   end if;
                end;
-            end loop;
+            end if;
+         end loop;
+         Cap := 1 + Integer (Long_Float'Floor (Long_Float (Turn_N) / 14.0 * Nat_Press));
+         Beasts := Beasts0;
+         for F in 0 .. Fac_N - 1 loop
+            if Factions (F).Alive and then Policy (F).Beast > Beast_Mul then
+               Beast_Mul := Policy (F).Beast;
+            end if;
+         end loop;
+         if FN > 0 and then Beasts < Cap
+           and then Rand < Long_Float'Min (0.6, Long_Float (FN) / 120.0 * Nat_Press * Beast_Mul)
+         then
+            S := Fung (RI (FN));
+            declare
+               Near : Boolean := False;
+            begin
+               for C in 0 .. City_N - 1 loop
+                  if Dist (Cities (C).Loc, S) <= 3 then
+                     Near := True;
+                  end if;
+               end loop;
+               for U in 0 .. Unit_N - 1 loop
+                  if Units (U).Loc = S then
+                     Near := True;
+                  end if;
+               end loop;
+               if not Near and then Make_Unit (-1, Beast, S) >= 0 then
+                  Log ("T" & Img (Turn_N) & " a Spore Beast emerges");
+               end if;
+            end;
          end if;
       end;
    end Run_Natives;
@@ -3885,7 +4406,7 @@ package body Colony is
                C, Kind : Integer;
             begin
                for I in 0 .. City_N - 1 loop
-                  if Cities (I).Fac = F then
+                  if Cities (I).Fac = F and then not Cities (I).UG then
                      List (N) := I;
                      N := N + 1;
                   end if;
@@ -3899,8 +4420,7 @@ package body Colony is
                         Log ("T" & Img (Turn_N) & " mineral windfall at " & Name_Of (Cities (C)));
                      when 1 =>
                         Factions (F).Credits := Factions (F).Credits + 40;
-                        Cities (C).Mood_Add := 1;
-                        Cities (C).Mood_Until := Turn_N + 6;
+                        Mood_Event (C, 1, 6);
                         Log ("T" & Img (Turn_N) & " supply pod at " & Name_Of (Cities (C)));
                      when 2 =>
                         declare
@@ -3911,28 +4431,53 @@ package body Colony is
                         end;
                      when 3 =>
                         Cities (C).Food := Food_Box (C) - 1;
-                        Cities (C).Mood_Add := 1;
-                        Cities (C).Mood_Until := Turn_N + 8;
+                        Mood_Event (C, 1, 8);
                         Log ("T" & Img (Turn_N) & " bumper harvest at " & Name_Of (Cities (C)));
                      when 4 =>
-                        Cities (C).Mood_Add := (if Slot_Key (F) = 2 then 1 else -1);
-                        Cities (C).Mood_Until := Turn_N + 8;
+                        Mood_Event (C, (if Slot_Key (F) = 2 or else Policy (F).Fsoothe > 0.0 then 1 else -1), 8);
+                        declare
+                           Nb : Nbr_Arr;
+                           NN : Natural;
+                        begin
+                           Nbrs (Cities (C).Loc, 3, NN, Nb);
+                           for K in 0 .. NN - 1 loop
+                              if Tiles (Nb (K)).Land and then not Tiles (Nb (K)).Fungus
+                                and then Tiles (Nb (K)).Imp = None and then City_At (Nb (K)) < 0
+                                and then Rand < 0.3
+                              then
+                                 Tiles (Nb (K)).Fungus := True;
+                              end if;
+                           end loop;
+                        end;
                         Log ("T" & Img (Turn_N) & " fungal bloom near " & Name_Of (Cities (C)));
                      when others =>
                         declare
                            Nb : Nbr_Arr;
                            NN : Natural;
-                           Spot : Integer := -1;
+                           Cand : Nbr_Arr;
+                           CN : Natural := 0;
                         begin
                            Nbrs (Cities (C).Loc, 4, NN, Nb);
                            for K in 0 .. NN - 1 loop
                               if Tiles (Nb (K)).Land and then Dist (Nb (K), Cities (C).Loc) >= 3
                                 and then City_At (Nb (K)) < 0
                               then
-                                 Spot := Nb (K);
+                                 declare
+                                    Busy : Boolean := False;
+                                 begin
+                                    for U in 0 .. Unit_N - 1 loop
+                                       if Units (U).Loc = Nb (K) then
+                                          Busy := True;
+                                       end if;
+                                    end loop;
+                                    if not Busy then
+                                       Cand (CN) := Nb (K);
+                                       CN := CN + 1;
+                                    end if;
+                                 end;
                               end if;
                            end loop;
-                           if Spot >= 0 and then Make_Unit (-1, Beast, Spot) >= 0 then
+                           if CN > 0 and then Make_Unit (-1, Beast, Cand (RI (CN))) >= 0 then
                               Log ("T" & Img (Turn_N) & " spore surge near " & Name_Of (Cities (C)));
                            end if;
                         end;
@@ -3975,7 +4520,7 @@ package body Colony is
             Asc_On := True;
             Asc_Fac := Cities (C).Fac;
             Asc_City := Cities (C).Id;
-            Asc_Left := 12;
+            Asc_Left := (if W * H > 1800 then 15 else 12);
             Log ("T" & Img (Turn_N) & " ascension begins in " & Name_Of (Cities (C)));
          else
             Log ("T" & Img (Turn_N) & " " & Name_Of (Cities (C)) & " builds "
@@ -3984,19 +4529,97 @@ package body Colony is
       end if;
    end Finish_Item;
 
+   procedure Riot (C : Integer) is
+      R : constant Long_Float := Rand;
+      Sel : array (0 .. 7) of Integer;
+      NS : Natural := 0;
+      Cand : Nbr_Arr;
+      CN : Natural := 0;
+      Nb : Nbr_Arr;
+      NN : Natural;
+      K : Fac_Kind;
+      Drop : Integer;
+   begin
+      if R >= 0.55 and then R < 0.85 then
+         for I in 0 .. Cities (C).Fac_N - 1 loop
+            if Cities (C).Facs (I) in 0 .. Fac_Kind'Pos (Fac_Kind'Last) then
+               K := Fac_Kind'Val (Cities (C).Facs (I));
+               if not F_Project (K) and then F_Ent (K) = 0 then
+                  Sel (NS) := I;
+                  NS := NS + 1;
+               end if;
+            end if;
+         end loop;
+         if NS > 0 then
+            declare
+               Cut : constant Integer := Sel (RI (NS));
+            begin
+               for I in Cut .. Cities (C).Fac_N - 2 loop
+                  Cities (C).Facs (I) := Cities (C).Facs (I + 1);
+               end loop;
+               Cities (C).Fac_N := Cities (C).Fac_N - 1;
+            end;
+            Log ("T" & Img (Turn_N) & " riot in " & Name_Of (Cities (C)));
+            return;
+         end if;
+      elsif R >= 0.85 and then not Cities (C).UG then
+         Nbrs (Cities (C).Loc, 1, NN, Nb);
+         for I in 0 .. NN - 1 loop
+            if Tiles (Nb (I)).Land and then City_At (Nb (I)) < 0 then
+               declare
+                  Busy : Boolean := False;
+               begin
+                  for U in 0 .. Unit_N - 1 loop
+                     if Units (U).Loc = Nb (I) then
+                        Busy := True;
+                     end if;
+                  end loop;
+                  if not Busy then
+                     Cand (CN) := Nb (I);
+                     CN := CN + 1;
+                  end if;
+               end;
+            end if;
+         end loop;
+         if CN > 0 and then Make_Unit (-1, Rebel, Cand (RI (CN))) >= 0 then
+            Log ("T" & Img (Turn_N) & " riot in " & Name_Of (Cities (C)));
+            return;
+         end if;
+      end if;
+      Drop := Integer'Min (2, Cities (C).Work_N);
+      Cities (C).Work_N := Cities (C).Work_N - Drop;
+      Log ("T" & Img (Turn_N) & " riot in " & Name_Of (Cities (C)));
+   end Riot;
+
    procedure Process_Faction (Fid : Integer) is
-      N, Mi, En, Sur, Mood, NC : Integer;
+      N, Mi, En, Sur, Mood, NC, Support, Gain : Integer;
       Energy, Maint, Labs, Econ : Integer := 0;
       M : Mods;
       Spires : Integer := 0;
       Mul, Labs_Mul : Long_Float;
+      Home_Guard : Boolean;
    begin
       M := Policy (Fid);
+      declare
+         DL : constant Integer :=
+           Integer (Factions (Fid).Lost_Att) - Integer (Factions (Fid).Lost_Seen);
+      begin
+         Factions (Fid).Lost_Seen := Factions (Fid).Lost_Att;
+         Factions (Fid).WW :=
+           Long_Float (JS_Round ((Factions (Fid).WW * 0.92 + Long_Float (DL)) * 100.0)) / 100.0;
+      end;
       for C in 0 .. City_N - 1 loop
          if Cities (C).Fac = Fid then
             Assign_Work (C);
-            Morale (C);
-            Mood := (if Turn_N >= 10 then Cities (C).Mood else 0);
+            if Turn_N >= 10 then
+               Morale (C);
+               Mood := Cities (C).Mood;
+            else
+               Mood := 0;
+            end if;
+            if Mood = 2 and then Rand < 0.5 then
+               Riot (C);
+            end if;
             City_Base (C, N, Mi, En);
             N := N + Integer (Long_Float'Floor (M.Food));
             Mi := JS_Round (Long_Float (Mi) * M.Min);
@@ -4024,13 +4647,31 @@ package body Colony is
             elsif Cities (C).Food < 0 then
                if Cities (C).Pop > 1 then
                   Cities (C).Pop := Cities (C).Pop - 1;
+                  Mood_Event (C, -1, 5);
                   Log ("T" & Img (Turn_N) & " " & Name_Of (Cities (C)) & " starves");
                end if;
                Cities (C).Food := 0;
             end if;
+            Support := 0;
+            for U in 0 .. Unit_N - 1 loop
+               if Units (U).Fac = Fid and then Units (U).Home = Cities (C).Id then
+                  Support := Support + 1;
+               end if;
+            end loop;
+            Support := Integer'Max (0, Support - 2);
             if not Factions (Fid).AI and then Cities (C).Q_Len = 0 then
+               Home_Guard := False;
+               for U in 0 .. Unit_N - 1 loop
+                  if Units (U).Fac = Fid and then Units (U).Loc = Cities (C).Loc
+                    and then not U_Civ (Units (U).Kind)
+                  then
+                     Home_Guard := True;
+                  end if;
+               end loop;
                if Cities (C).Pop >= 2 and then Count_Units (Fid, Colonist) = 0 then
                   Cities (C).Queue (0) := Unit_Kind'Pos (Colonist);
+               elsif Home_Guard then
+                  Cities (C).Queue (0) := Unit_Kind'Pos (Terraformer);
                else
                   Cities (C).Queue (0) := Unit_Kind'Pos (Trooper);
                end if;
@@ -4043,7 +4684,10 @@ package body Colony is
             then
                Mul := Mul * 1.35;
             end if;
-            Cities (C).Prod := Cities (C).Prod + Integer'Max (0, JS_Round (Long_Float (Mi) * Mul));
+            Gain := Integer'Max (0, JS_Round (Long_Float (Mi) * Mul) - Support);
+            if not (Cities (C).UG and then Cities (C).Res_Set and then Cities (C).Pow = 0) then
+               Cities (C).Prod := Cities (C).Prod + Gain;
+            end if;
             Energy := Energy + En;
             for I in 0 .. Cities (C).Fac_N - 1 loop
                if Cities (C).Facs (I) in 0 .. Fac_Kind'Pos (Fac_Kind'Last) then
@@ -4095,6 +4739,14 @@ package body Colony is
                         * Mul_For (Fid) * M.Labs);
       Factions (Fid).Credits := Factions (Fid).Credits + Econ - Maint;
       if Factions (Fid).Credits < 0 then
+         for C in 0 .. City_N - 1 loop
+            if Cities (C).Fac = Fid and then Cities (C).Fac_N > 0
+              and then Cities (C).Facs (Cities (C).Fac_N - 1) /= Fac_Kind'Pos (Asc_Array)
+            then
+               Cities (C).Fac_N := Cities (C).Fac_N - 1;
+               exit;
+            end if;
+         end loop;
          Factions (Fid).Credits := 0;
       end if;
       Pick_Research (Fid);
@@ -4296,6 +4948,46 @@ package body Colony is
       end case;
    end Rel_Code;
 
+   procedure Expel (A, B : Integer) is
+      Home, Best, BD, D : Integer;
+   begin
+      Territory;
+      Home := -1;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = A and then not Cities (C).UG then
+            Home := C;
+            exit;
+         end if;
+      end loop;
+      if Home < 0 then
+         return;
+      end if;
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac = A and then Units (U).Loc in 0 .. NTiles - 1
+           and then Terr (Units (U).Loc) = B and then not Pass_OK (A, B)
+           and then not U_Ship (Units (U).Kind) and then Units (U).On_Ship < 0
+           and then Tiles (Units (U).Loc).Land
+         then
+            Best := Home;
+            BD := Dist (Cities (Home).Loc, Units (U).Loc);
+            for C in 0 .. City_N - 1 loop
+               if Cities (C).Fac = A and then not Cities (C).UG then
+                  D := Dist (Cities (C).Loc, Units (U).Loc);
+                  if D < BD then
+                     BD := D;
+                     Best := C;
+                  end if;
+               end if;
+            end loop;
+            Units (U).Loc := Cities (Best).Loc;
+            Units (U).Goto_At := -1;
+            Units (U).Target := -1;
+            Units (U).Work := W_None;
+            Log ("T" & Img (Turn_N) & " units withdraw");
+         end if;
+      end loop;
+   end Expel;
+
    procedure Set_Rel (A, B : Integer; R : Rel_Kind) is
    begin
       Rel (A, B) := R;
@@ -4305,6 +4997,10 @@ package body Colony is
       if R = Rel_War or else R = Rel_Cease then
          Open_B (A, B) := False;
          Open_B (B, A) := False;
+      end if;
+      if R /= Rel_War then
+         Expel (A => A, B => B);
+         Expel (A => B, B => A);
       end if;
       if R = Rel_War then
          for I in Contracts'Range loop
@@ -5860,6 +6556,7 @@ package body Colony is
                end case;
                Log ("T" & Img (Turn_N) & " terraforming finishes");
                Units (Ix).Work := W_None;
+               Units (Ix).Target := -1;
             end if;
          end if;
          declare
@@ -6583,14 +7280,16 @@ package body Colony is
       Asc_City := -1;
       Asc_Left := 0;
       Dom_Turns := (others => 0);
+      Lm_Ready := False;
+      March_Turn := -1;
       for F in 0 .. 3 loop
          Factions (F) := (Used => False, Alive => False, AI => True, Policy_Set => False,
-                          Keyi => 0, Credits => 10, RP => 0, Research => -1, Tech_N => 0,
-                          Plan => 0, Unrest => 0, Start => 0, Labs => 0.5, WW => 0.0,
-                          Techs => (others => False), Pol => (others => 0),
+                          Ns_On => False, Keyi => 0, Credits => 10, RP => 0, Research => -1,
+                          Tech_N => 0, Plan => 0, Unrest => 0, Start => 0, Ns_Turn => -100,
+                          Labs => 0.5, WW => 0.0, Techs => (others => False), Pol => (others => 0),
                           Seen => (others => False), Vis => (others => False),
-                          Mem => (others => 0), Built => 0, Lost => 0, Kills => 0,
-                          Founded => 0, Combats => 0);
+                          Mem => (others => 0), Built => 0, Lost => 0, Lost_Att => 0,
+                          Lost_Seen => 0, Kills => 0, Founded => 0, Combats => 0);
       end loop;
       Keys (0) := Player_I;
       KN := 1;
@@ -8385,5 +9084,84 @@ package body Colony is
       Build_Frame;
       return 0;
    end C_Set_Viewer;
+
+   procedure TPut (S : String) is
+   begin
+      if Tr_Len + S'Length + 1 <= Tr_Store'Last then
+         Tr_Store (Tr_Len + 1 .. Tr_Len + S'Length) := S;
+         Tr_Len := Tr_Len + S'Length;
+         Tr_Store (Tr_Len + 1) := ASCII.LF;
+         Tr_Len := Tr_Len + 1;
+      end if;
+   end TPut;
+
+   function Trace_Report return String is
+      Last : Natural := Tr_Len;
+   begin
+      while Last > 1 and then Tr_Store (Last) = ASCII.LF
+        and then Tr_Store (Last - 1) = ASCII.LF
+      loop
+         Last := Last - 1;
+      end loop;
+      return Tr_Store (1 .. Last);
+   end Trace_Report;
+
+   procedure Run_Trace (Turns, All_AI : Integer) is
+      function Mix (H, V : Integer) return Integer is
+        (To_Int ((To_U32 (H) * 16#01000193#) xor To_U32 (V)));
+      begin
+         Tr_Len := 0;
+         if New_Game (7919, 36, 24, 0, 3, All_AI, 2, 15) /= 0 then
+            TPut ("TRACE fail");
+            return;
+         end if;
+         for Step in 0 .. Turns loop
+            declare
+               Pop, UH, CH, FH, LH : Integer := 0;
+            begin
+               UH := 216613626;
+               CH := 216613626;
+               FH := 216613626;
+               LH := 216613626;
+               for I in 0 .. NTiles - 1 loop
+                  if Tiles (I).Fungus then
+                     FH := Mix (FH, I);
+                  end if;
+               end loop;
+               for C in 0 .. City_N - 1 loop
+                  Pop := Pop + Cities (C).Pop;
+                  CH := Mix (CH, Cities (C).Id);
+                  CH := Mix (CH, Cities (C).Fac);
+                  CH := Mix (CH, Cities (C).Loc);
+                  CH := Mix (CH, Cities (C).Pop);
+                  CH := Mix (CH, Cities (C).Food);
+                  CH := Mix (CH, Cities (C).Prod);
+               end loop;
+               for U in 0 .. Unit_N - 1 loop
+                  UH := Mix (UH, Units (U).Id);
+                  UH := Mix (UH, Units (U).Fac);
+                  UH := Mix (UH, Unit_Kind'Pos (Units (U).Kind));
+                  UH := Mix (UH, Units (U).Loc);
+                  UH := Mix (UH, Units (U).HP);
+                  LH := Mix (LH, Units (U).Id * 17 + Units (U).Loc);
+                  LH := Mix (LH, Units (U).Target);
+                  LH := Mix (LH, Units (U).HP + 3);
+               end loop;
+               TPut
+                 ("T" & Img (Turn_N) & " rs=" & UImg (RS) & " c=" & Img (City_N)
+                  & " p=" & Img (Pop) & " u=" & Img (Unit_N)
+                  & " cr=" & Img (Factions (0).Credits) & "," & Img (Factions (1).Credits)
+                  & "," & Img (Factions (2).Credits) & "," & Img (Factions (3).Credits)
+                  & " tc=" & Img (Factions (0).Tech_N) & "," & Img (Factions (1).Tech_N)
+                  & "," & Img (Factions (2).Tech_N) & "," & Img (Factions (3).Tech_N)
+                  & " pl=" & Img (Factions (0).Plan) & "," & Img (Factions (1).Plan)
+                  & "," & Img (Factions (2).Plan) & "," & Img (Factions (3).Plan)
+                  & " uh=" & Img (UH) & " ch=" & Img (CH) & " fh=" & Img (FH)
+                  & " lh=" & Img (LH));
+            end;
+            exit when Step = Turns;
+            End_Turn;
+         end loop;
+      end Run_Trace;
 
 end Colony;

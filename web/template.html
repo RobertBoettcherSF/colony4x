@@ -82,6 +82,7 @@ kbd { background: #30363d; border-radius: 3px; padding: 0 4px; }
     <p class="small">The rules run in Ada, compiled to WebAssembly. This page only draws the map.</p>
     <p><button id="watchBtn" class="primary" type="button" disabled>Watch a game</button></p>
     <p><button id="playBtn" class="quiet" type="button" disabled>Play yourself</button></p>
+    <p class="small"><label><input id="agg" type="checkbox"> Aggressive rivals</label></p>
     <p class="small"><a href="classic.html">Previous JavaScript edition</a> — the same rules, not a fallback for this page.</p>
     <p class="small" id="engineLine">Loading the Ada engine…</p>
   </div>
@@ -399,7 +400,8 @@ function start(allAI) {
   $("landing").hidden = true;
   reveal = !!allAI;
   $("revealCb").checked = reveal;
-  const r = api.c4x_new(7919, 36, 24, allAI ? 0 : 1, 3, allAI ? 1 : 0, 2, RULES);
+  const rules = RULES | ($("agg").checked ? 1024 : 0);
+  const r = api.c4x_new(7919, 36, 24, allAI ? 0 : 1, 3, allAI ? 1 : 0, 2, rules);
   if (r !== 0) { toast(text(8) || "Could not start", "bad"); $("landing").hidden = false; return; }
   if (reveal) api.c4x_set_viewer(-1);
   if (!refresh()) return;

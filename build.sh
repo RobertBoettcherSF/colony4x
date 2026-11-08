@@ -79,5 +79,13 @@ if ! cmp -s obj/js-mechanics.txt obj/native-mechanics.txt; then
   exit 1
 fi
 echo "JavaScript, native Ada, and WebAssembly mechanics match"
+./scenario trace > obj/native-trace.txt
+node tools/js_trace.mjs > obj/js-trace.txt
+if ! cmp -s obj/js-trace.txt obj/native-trace.txt; then
+  echo "25-turn JavaScript and Ada snapshots differ"
+  diff -u obj/js-trace.txt obj/native-trace.txt || true
+  exit 1
+fi
+echo "25-turn JavaScript and Ada snapshots match"
 python3 tools/embed.py obj/wasm/colony.wasm web/template.html index.html
 echo "Built index.html ($(wc -c < obj/wasm/colony.wasm) bytes of WebAssembly)"

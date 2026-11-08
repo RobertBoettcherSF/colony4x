@@ -18,7 +18,7 @@ sudo apt-get install gnat gprbuild lld rpm2cpio cpio unzip clang
 ./build.sh                 # native scenario, wasm, report comparison, index.html
 ```
 
-`./scenario` prints three lines, `WATCH`, `MANUAL` and `MECH`. Each line carries `status=pass` when every expectation held and `status=fail` when one did not. `code=0` is only a success code next to `status=pass`; a line that merely contains `0` is not a pass. The process exits 0 only when every line is `status=pass`. `node tools/smoke_wasm.mjs obj/wasm/colony.wasm` prints the same three lines and exits non-zero on `status=fail` or a non-zero code. `./build.sh` fails if the native and WebAssembly reports differ, or if the `MECH` line differs from `node tools/js_mechanics.mjs` (the JavaScript rules, same fixtures).
+`./scenario` prints three lines, `WATCH`, `MANUAL` and `MECH`. Each line carries `status=pass` when every expectation held and `status=fail` when one did not. `code=0` is only a success code next to `status=pass`; a line that merely contains `0` is not a pass. The process exits 0 only when every line is `status=pass`. `node tools/smoke_wasm.mjs obj/wasm/colony.wasm` prints the same three lines and exits non-zero on `status=fail` or a non-zero code. `./build.sh` fails if the native and WebAssembly reports differ, if the `MECH` and `REST` lines differ from `node tools/js_mechanics.mjs`, or if `./scenario trace` differs from `node tools/js_trace.mjs`. That trace is the same seed 7919, 36×24 game for 25 turns with events, diplomatic victories and cooperative victories off, and it compares the full turn record: random stream, cities, population, units, credits, research, plans, and hashes of units, cities, fungus and unit locations.
 
 Browser check (system Chrome, `puppeteer-core` on `NODE_PATH`):
 
@@ -34,14 +34,21 @@ The watched map is checked against the JavaScript edition’s generator for seed
 
 The map generator, yields, growth, production, research, fog, morale, policies, territory, and the JavaScript victory set: conquest, ascension, economic, dominion, score, diplomatic, and cooperative. The default rule word is 911, the same switches as `game.js` `DEFAULT_RULES` (those victories, plus events). Warren supply, tunnel dig / flood / collapse, naval bombardment, the diplomacy bargain and trade AI, the depth-3 strategic planner, burrower rush, and troop transports (board, carry, land, and sail cargo toward another landmass) are in the Ada engine. `classic.html` is the previous JavaScript edition, linked from the landing card; a failed engine does not fall back to it. Nothing here changes the live Pages root until the pull request is merged.
 
-A 25-turn smoke (`long=1`) finishes with cities on the map in both engines. It is not a byte-identical autoplay. On seed 7919, 36×24, events off, after 25 turns the JavaScript edition had 5 cities, population 16 and 21 units; this Ada engine had 7 cities, population 15 and 20 units. The single-step colonist, terraformer and military choices on a fresh map match `game.js` (`col`, `terra`, `mil` on the `REST` line). The later difference comes from the rest of the turn, not from a shortened copy of those three loops.
+`./scenario trace` and `node tools/js_trace.mjs` print the same 26 snapshots for that events-off game, including the random stream. The comparison calls `act({type:'endTurn'})`, which is what the original client does, so production costs include the current policy. Calling `endTurn` by itself leaves that state unset and is not the played rules.
 
-Checklist of what is still not the JavaScript edition:
+The landing card has an Aggressive rivals checkbox. It sets rule bit 10. The default word stays 911, so the switch is off unless the box is checked, matching `DEFAULT_RULES`.
 
-- City production, growth, morale and riots are not a line-for-line port, so a long game drifts even when a single order matches.
-- A strike march uses the forward path. The JavaScript `marchTo` walks a path searched from the destination, which can pick another shortest path when several exist.
-- The `aggressive` rules switch is off in both defaults. It is not a separate bit in the rule word.
-- An own-land trade shuttle skips every land city when the home port is on land. The JavaScript rule skips that city only when it is on the same landmass. Sea-city shuttles, which the fixture checks, follow the original choice.
+## Rule map
+
+These `game.js` rules are in the Ada engine and are what the 25-turn trace and the `MECH`/`REST` fixtures exercise: map generation, movement and combat, city work, yields, growth, production (including garrison support and the policy cost), morale, riots, mood events, war weariness, research, territory and sea dominion, supply, tunnels, bombardment, diplomacy including withdrawal after a treaty, the depth-3 planner, city build order, colonist and terraformer job choice, military orders, the reverse strike march, burrower rush, transports, the trade shuttle’s same-landmass test, and the victory checks.
+
+Presentation only, not a second simulation: city and faction names, the event log wording, the canvas, and the help text.
+
+Still not the same as `game.js`, and not exercised by the 25-turn trace:
+
+- The AI policy reviser after turn 40. The engine does set each personality’s opening policy at turn 15. It does not re-evaluate that policy on the later schedule.
+- The military “wait for a ship” branch that sends an army to a port when every known enemy city is on another landmass. Strike marches that stay on one landmass use the original reverse path.
+- A full all-AI game with random events left on is not claimed to stay identical past the fixture. The trace above turns events off so the comparison can be exact. Event resolution itself (windfall, pod, flare, harvest, bloom, surge) is in the engine.
 
 ## Other ways to run it
 
