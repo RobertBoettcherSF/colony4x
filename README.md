@@ -34,7 +34,14 @@ The watched map is checked against the JavaScript edition’s generator for seed
 
 The map generator, yields, growth, production, research, fog, morale, policies, territory, and the JavaScript victory set: conquest, ascension, economic, dominion, score, diplomatic, and cooperative. The default rule word is 911, the same switches as `game.js` `DEFAULT_RULES` (those victories, plus events). Warren supply, tunnel dig / flood / collapse, naval bombardment, the diplomacy bargain and trade AI, the depth-3 strategic planner, burrower rush, and troop transports (board, carry, land, and sail cargo toward another landmass) are in the Ada engine. `classic.html` is the previous JavaScript edition, linked from the landing card; a failed engine does not fall back to it. Nothing here changes the live Pages root until the pull request is merged.
 
-A long autoplay is still not turn-for-turn with `game.js`. The colonist, terraformer, and military target loops are shorter than the JavaScript ones, so they draw the shared random sequence in a different order. That is a difference inside those loops, not a missing victory. Ship trade shuttles and the skiff explore loop are not the JavaScript `tradeRun`. Dominion share counts land; the JavaScript edition also counts sea tiles held by sea cities.
+A 25-turn smoke (`long=1`) finishes with cities on the map in both engines. It is not a byte-identical autoplay. On seed 7919, 36×24, events off, after 25 turns the JavaScript edition had 5 cities, population 16 and 21 units; this Ada engine had 7 cities, population 15 and 20 units. The single-step colonist, terraformer and military choices on a fresh map match `game.js` (`col`, `terra`, `mil` on the `REST` line). The later difference comes from the rest of the turn, not from a shortened copy of those three loops.
+
+Checklist of what is still not the JavaScript edition:
+
+- City production, growth, morale and riots are not a line-for-line port, so a long game drifts even when a single order matches.
+- A strike march uses the forward path. The JavaScript `marchTo` walks a path searched from the destination, which can pick another shortest path when several exist.
+- The `aggressive` rules switch is off in both defaults. It is not a separate bit in the rule word.
+- An own-land trade shuttle skips every land city when the home port is on land. The JavaScript rule skips that city only when it is on the same landmass. Sea-city shuttles, which the fixture checks, follow the original choice.
 
 ## Other ways to run it
 

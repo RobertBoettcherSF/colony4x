@@ -60,7 +60,7 @@ package body Colony is
 
    type Unit_Rec is record
       Id, Fac, Loc, HP, MP, Home, Goto_At, Target, Work_Left, On_Ship, Tn,
-      Wait_T, Dest, Dest_T, Lt, Orig : Integer := -1;
+      Wait_T, Dest, Dest_T, Lt, Orig, Trade_City, Trade_To, Trade_Home, Trade_Leg : Integer := -1;
       Kind  : Unit_Kind := Trooper;
       Fort, Skip, No_Heal, Want_Ship, Rush : Boolean := False;
       Work  : Work_Kind := W_None;
@@ -170,6 +170,8 @@ package body Colony is
    function Collapse_Tunnel (Fid, Tile : Integer) return String;
    function U_Bomb (K : Unit_Kind) return Boolean;
    function Bombard (Uidx, Tile : Integer) return Boolean;
+   function Can_Flood (Fid, Tile : Integer) return Boolean;
+   function Flood_Tunnel (Uidx, Tile : Integer) return Boolean;
    function Known_Owner (Fid, Cidx : Integer) return Integer;
    function Mil_Power (Fid : Integer) return Long_Float;
    function Strength_Of (A, B : Integer) return Long_Float;
@@ -871,7 +873,7 @@ package body Colony is
          Terr (I) := -1;
       end loop;
          for C in 0 .. City_N - 1 loop
-            R := (if Cities (C).Pop >= 5 then 4 else 3);
+            R := (if Cities (C).UG then 2 elsif Cities (C).Pop >= 5 then 4 else 3);
             for I in 0 .. NTiles - 1 loop
                D := Dist (I, Cities (C).Loc);
                if D <= R and then (D < DBest (I) or else (D = DBest (I) and then Cities (C).Id < IdBest (I))) then
@@ -2189,6 +2191,14 @@ package body Colony is
             Occ_A (Cities (CI).Loc) := Occ_A (Cities (CI).Loc) or 8;
          end if;
       end loop;
+      if Fid >= 0 then
+         Territory;
+         for I in 0 .. NTiles - 1 loop
+            if Terr (I) >= 0 and then not Pass_OK (Fid, Terr (I)) then
+               Occ_A (I) := Occ_A (I) or 4;
+            end if;
+         end loop;
+      end if;
       if Start < 0 or else Start >= NTiles then
          return;
       end if;
@@ -2209,6 +2219,8 @@ package body Colony is
                      if In_Map (Nx, Ny) then
                         N := Ny * W + Nx;
                         if Dist_A (N) < 0
+                          and then not (not Ignore_Enemy and then (Occ_A (N) and 4) /= 0
+                                        and then (Mode = 0 or else Tiles (N).Land))
                           and then (if Mode = 1
                                     then (not Tiles (N).Land and then (Occ_A (N) and 2) = 0)
                                       or else (Occ_A (N) and 8) /= 0
@@ -2596,6 +2608,9 @@ package body Colony is
    end AI_Rush;
 
    procedure Load_Waiters (U : Integer);
+   procedure Trade_Or_Home (U : Integer);
+   procedure Trade_Run (U : Integer);
+   procedure Skiff_Explore (U : Integer);
    procedure Sail_Cargo (U : Integer) is
       Fid : Integer;
       Cargo : Integer := 0;
@@ -2616,6 +2631,7 @@ package body Colony is
          end if;
       end loop;
       if Cargo = 0 then
+         Trade_Or_Home (U);
          return;
       end if;
       for I in 0 .. NTiles - 1 loop
@@ -2901,6 +2917,251 @@ package body Colony is
       end;
    end AI_Burrower;
 
+   procedure Trade_Run (U : Integer) is
+      Fid : constant Integer := Units (U).Fac;
+      function Home_Of return Integer is
+         Best, Bd, V : Integer;
+      begin
+         BFS (Units (U).Loc, Fid, 40, False, 1);
+         Best := -1;
+         Bd := 999999;
+         for C in 0 .. City_N - 1 loop
+            if Cities (C).Fac = Fid and then Coastal (C) and then Dist_A (Cities (C).Loc) >= 0 then
+               V := Dist_A (Cities (C).Loc) * 2 + (if City_Has (C, Docks) then 0 else 3);
+               if V < Bd then
+                  Bd := V;
+                  Best := Cities (C).Loc;
+               end if;
+            end if;
+         end loop;
+         return Best;
+      end Home_Of;
+      function Valid return Boolean is
+         C : Integer;
+      begin
+         if Units (U).Trade_Leg < 0 then
+            return False;
+         end if;
+         C := Find_City (Units (U).Trade_City);
+         if C < 0 or else not Coastal (C) then
+            return False;
+         end if;
+         if Cities (C).Fac /= Fid
+           and then Rel (Fid, Cities (C).Fac) /= Rel_Peace
+           and then Rel (Fid, Cities (C).Fac) /= Rel_Ally
+         then
+            return False;
+         end if;
+         return True;
+      end Valid;
+      Home, Goal, C, G : Integer;
+      Best_C, Best_To : Integer;
+      BV : Long_Float;
+   begin
+      if not Valid then
+         Units (U).Trade_Leg := -1;
+         Home := Home_Of;
+         if Home < 0 then
+            Units (U).Fort := True;
+            return;
+         end if;
+         Best_C := -1;
+         Best_To := -1;
+         BV := -1.0e9;
+         for CI in 0 .. City_N - 1 loop
+            if Coastal (CI) and then Cities (CI).Loc /= Home then
+               declare
+                  Own : constant Boolean := Cities (CI).Fac = Fid;
+                  Skip : Boolean := False;
+                  Tile, Len : Integer;
+                  Nb : Nbr_Arr;
+                  NN : Natural;
+                  Score : Long_Float;
+               begin
+                  if Own then
+                     Skip := not Cities (CI).Sea and then City_At (Home) >= 0 and then not Cities (City_At (Home)).Sea;
+                  else
+                     Skip := Rel (Fid, Cities (CI).Fac) /= Rel_Peace
+                       and then Rel (Fid, Cities (CI).Fac) /= Rel_Ally;
+                  end if;
+                  if not Skip then
+                     if not Tiles (Cities (CI).Loc).Land
+                       and then (Cities (CI).Fac = Fid
+                                 or else (Cities (CI).Fac >= 0 and then Rel (Fid, Cities (CI).Fac) = Rel_Ally))
+                     then
+                        Tile := Cities (CI).Loc;
+                     else
+                        Tile := -1;
+                        Nbrs (Cities (CI).Loc, 1, NN, Nb);
+                        for K in 0 .. NN - 1 loop
+                           if not Tiles (Nb (K)).Land and then City_At (Nb (K)) < 0
+                             and then Dist_A (Nb (K)) >= 0
+                             and then (Tile < 0 or else Dist_A (Nb (K)) < Dist_A (Tile)
+                                       or else (Dist_A (Nb (K)) = Dist_A (Tile) and then Nb (K) < Tile))
+                           then
+                              Tile := Nb (K);
+                           end if;
+                        end loop;
+                     end if;
+                     if Tile >= 0 and then Dist_A (Tile) >= 0 then
+                        Len := Dist (Home, Cities (CI).Loc);
+                        if Len >= 6 then
+                           Score := Long_Float (Integer'Min (Len, 30)) - Long_Float (Dist_A (Tile)) * 0.3
+                             + (if Own then 0.0 else 5.0);
+                           if Score > BV then
+                              BV := Score;
+                              Best_C := Cities (CI).Id;
+                              Best_To := Tile;
+                           end if;
+                        end if;
+                     end if;
+                  end if;
+               end;
+            end if;
+         end loop;
+         if Best_C < 0 then
+            if Home /= Units (U).Loc then
+               Move_Toward (U, Home, 40);
+            else
+               Units (U).Fort := True;
+            end if;
+            return;
+         end if;
+         Units (U).Trade_City := Best_C;
+         Units (U).Trade_To := Best_To;
+         Units (U).Trade_Home := Home;
+         Units (U).Trade_Leg := 0;
+      end if;
+      if Units (U).Trade_Leg = 0 then
+         Goal := Units (U).Trade_To;
+      else
+         Goal := Units (U).Trade_Home;
+      end if;
+      if Units (U).Loc /= Goal then
+         Move_Toward (U, Goal, 40);
+      end if;
+      declare
+         Id : constant Integer := Units (U).Id;
+         V : constant Integer := Find_Unit (Id);
+      begin
+         if V < 0 or else Units (V).Loc /= Goal then
+            return;
+         end if;
+         if Units (V).Trade_Leg = 0 then
+            C := Find_City (Units (V).Trade_City);
+            if C >= 0 then
+               G := 1 + Dist (Units (V).Trade_Home, Cities (C).Loc) / 6;
+               Factions (Fid).Credits := Factions (Fid).Credits + G;
+               if Cities (C).Fac /= Fid and then Cities (C).Fac in 0 .. Fac_N - 1 then
+                  Factions (Cities (C).Fac).Credits :=
+                    Factions (Cities (C).Fac).Credits + G / 2;
+               end if;
+               Log ("T" & Img (Turn_N) & " trade run +" & Img (G));
+            end if;
+            Units (V).Trade_Leg := 1;
+         else
+            Units (V).Trade_Leg := 0;
+         end if;
+      end;
+   end Trade_Run;
+
+   procedure Trade_Or_Home (U : Integer) is
+      Fid : constant Integer := Units (U).Fac;
+      Pers : constant Integer := Slot_Key (Fid);
+      Best, Bd : Integer;
+   begin
+      BFS (Units (U).Loc, Fid, 40, False, 1);
+      Best := -1;
+      Bd := 999999;
+      for O in 0 .. Unit_N - 1 loop
+         if Units (O).Fac = Fid and then Units (O).Want_Ship and then Units (O).On_Ship < 0
+           and then Dist_A (Units (O).Loc) >= 0 and then Dist_A (Units (O).Loc) < Bd
+         then
+            Bd := Dist_A (Units (O).Loc);
+            Best := Units (O).Loc;
+         end if;
+      end loop;
+      if Best >= 0 then
+         if Best /= Units (U).Loc then
+            Move_Toward (U, Best, 40);
+         end if;
+         declare
+            Id : constant Integer := Units (U).Id;
+            V : constant Integer := Find_Unit (Id);
+         begin
+            if V >= 0 then
+               Load_Waiters (V);
+            end if;
+         end;
+         return;
+      end if;
+      if Pers = 3 or else (Pers = 0 and then Units (U).Id mod 3 = 0)
+        or else (Pers = 1 and then Units (U).Id mod 2 = 0)
+      then
+         Trade_Run (U);
+         return;
+      end if;
+      Best := -1;
+      Bd := 999999;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = Fid and then Coastal (C) and then Dist_A (Cities (C).Loc) >= 0 then
+            declare
+               V : constant Integer := Dist_A (Cities (C).Loc) * 2
+                 + (if City_Has (C, Docks) then 0 else 3);
+            begin
+               if V < Bd then
+                  Bd := V;
+                  Best := Cities (C).Loc;
+               end if;
+            end;
+         end if;
+      end loop;
+      if Best >= 0 and then Best /= Units (U).Loc then
+         Move_Toward (U, Best, 40);
+      else
+         Units (U).Fort := True;
+      end if;
+   end Trade_Or_Home;
+
+   procedure Skiff_Explore (U : Integer) is
+      Fid : constant Integer := Units (U).Fac;
+      C2, Bd, V : Integer;
+   begin
+      BFS (Units (U).Loc, Fid, 40, False, 1);
+      if Units (U).Target < 0 or else Units (U).Target = Units (U).Loc
+        or else Units (U).Target not in 0 .. NTiles - 1
+        or else Factions (Fid).Seen (Units (U).Target)
+        or else Dist_A (Units (U).Target) < 0
+      then
+         C2 := -1;
+         Bd := 999999;
+         for I in 0 .. NTiles - 1 loop
+            if Dist_A (I) > 0 and then not Factions (Fid).Seen (I) then
+               V := Dist_A (I) * 2 + (I * 7 + Units (U).Id) mod 5;
+               if V < Bd then
+                  Bd := V;
+                  C2 := I;
+               end if;
+            end if;
+         end loop;
+         if C2 < 0 then
+            for I in 0 .. NTiles - 1 loop
+               if Dist_A (I) > 3 and then not Tiles (I).Land then
+                  V := (I * 31 + Turn_N * 17 + Units (U).Id) mod 97;
+                  if V < Bd then
+                     Bd := V;
+                     C2 := I;
+                  end if;
+               end if;
+            end loop;
+         end if;
+         Units (U).Target := C2;
+      end if;
+      if Units (U).Target >= 0 then
+         Move_Toward (U, Units (U).Target, 40);
+      end if;
+   end Skiff_Explore;
+
    procedure AI_Unit (U : Integer) is
       Fid : constant Integer := Units (U).Fac;
       Best, BD : Integer;
@@ -2939,6 +3200,10 @@ package body Colony is
             end loop;
          end;
       end if;
+      if Units (U).Kind = Skiff then
+         Skiff_Explore (U);
+         return;
+      end if;
       if U_Ship (Units (U).Kind) or else Units (U).On_Ship >= 0 then
          return;
       end if;
@@ -2948,8 +3213,7 @@ package body Colony is
       end if;
       if Units (U).Kind = Colonist then
          BFS (Units (U).Loc, Fid, 10);
-         if Units (U).Target < 0 or else Site_Score (Units (U).Target, Fid, False) <= 0.0
-           or else Dist_A (Units (U).Target) < 0
+         if Units (U).Target < 0 or else Site_Score (Units (U).Target, Fid, False) < 0.0
          then
             Best := -1;
             BS := 0.0;
@@ -2965,13 +3229,52 @@ package body Colony is
             Units (U).Target := Best;
          end if;
          if Units (U).Target < 0 then
-            if Site_Score (Units (U).Loc, Fid, False) > 0.0 then
+            if Site_Score (Units (U).Loc, Fid, False) >= 0.0 then
                if Found_City (U) then
                   return;
                end if;
             end if;
+            declare
+               Has_Tr : Boolean := False;
+               Waiters : Integer := 0;
+               Port, PD, V : Integer;
+            begin
+               for O in 0 .. Unit_N - 1 loop
+                  if Units (O).Fac = Fid and then Units (O).Kind = Transport then
+                     Has_Tr := True;
+                  end if;
+                  if Units (O).Fac = Fid and then Units (O).Want_Ship then
+                     Waiters := Waiters + 1;
+                  end if;
+               end loop;
+               if (Has_Docks (Fid) or else Has_Tr)
+                 and then (Units (U).Want_Ship or else Waiters < 3)
+               then
+                  BFS (Units (U).Loc, Fid, 30);
+                  Port := -1;
+                  PD := 999999;
+                  for C in 0 .. City_N - 1 loop
+                     if Cities (C).Fac = Fid and then Coastal (C) and then Dist_A (Cities (C).Loc) >= 0 then
+                        V := Dist_A (Cities (C).Loc) * 2 + (if City_Has (C, Docks) then 0 else 2);
+                        if V < PD then
+                           PD := V;
+                           Port := Cities (C).Loc;
+                        end if;
+                     end if;
+                  end loop;
+                  if Port >= 0 then
+                     Units (U).Want_Ship := True;
+                     if Units (U).Loc /= Port then
+                        Move_Toward (U, Port, 30);
+                     else
+                        Units (U).Skip := True;
+                     end if;
+                  end if;
+               end if;
+            end;
             return;
          end if;
+         Units (U).Want_Ship := False;
          if Units (U).Loc = Units (U).Target then
             if Found_City (U) then
                return;
@@ -2993,33 +3296,69 @@ package body Colony is
          return;
       end if;
       if Units (U).Kind = Terraformer then
-         Best := -1;
-         BD := 999;
-         for C in 0 .. City_N - 1 loop
-            if Cities (C).Fac = Fid then
-               for I in 0 .. NTiles - 1 loop
-                  if Dist (Cities (C).Loc, I) <= 2 then
-                     J := Job_Of (Fid, I);
-                     if J /= W_None and then Dist (Units (U).Loc, I) < BD then
-                        BD := Dist (Units (U).Loc, I);
-                        Best := I;
-                     end if;
+         declare
+            function Taken (I : Integer) return Boolean is
+            begin
+               for O in 0 .. Unit_N - 1 loop
+                  if O /= U and then Units (O).Fac = Fid and then Units (O).Target = I
+                  then
+                     return True;
                   end if;
                end loop;
+               return False;
+            end Taken;
+            function Worked (C, I : Integer) return Boolean is
+            begin
+               for Wk in 0 .. Cities (C).Work_N - 1 loop
+                  if Cities (C).Worked (Wk) = I then
+                     return True;
+                  end if;
+               end loop;
+               return False;
+            end Worked;
+            Nb : Nbr_Arr;
+            NN : Natural;
+            Wgt : Integer;
+         begin
+            if Units (U).Target < 0 or else Job_Of (Fid, Units (U).Target) = W_None
+              or else Taken (Units (U).Target)
+            then
+               BFS (Units (U).Loc, Fid, 14);
+               Best := -1;
+               BD := 99;
+               for C in 0 .. City_N - 1 loop
+                  if Cities (C).Fac = Fid then
+                     Nbrs (Cities (C).Loc, 2, NN, Nb);
+                     for K in -1 .. NN - 1 loop
+                        declare
+                           I : constant Integer := (if K < 0 then Cities (C).Loc else Nb (K));
+                        begin
+                           if Dist_A (I) >= 0 and then Job_Of (Fid, I) /= W_None and then not Taken (I) then
+                              Wgt := (if Worked (C, I) then 0 else 3);
+                              if Dist_A (I) + Wgt < BD then
+                                 BD := Dist_A (I) + Wgt;
+                                 Best := I;
+                              end if;
+                           end if;
+                        end;
+                     end loop;
+                  end if;
+               end loop;
+               Units (U).Target := Best;
             end if;
-         end loop;
-         if Best < 0 then
+         end;
+         if Units (U).Target < 0 then
             return;
          end if;
-         if Units (U).Loc /= Best then
-            Move_Toward (U, Best, 14);
+         if Units (U).Loc /= Units (U).Target then
+            Move_Toward (U, Units (U).Target, 14);
          end if;
          declare
             Id : constant Integer := Units (U).Id;
             V : constant Integer := Find_Unit (Id);
          begin
-            if V >= 0 and then Units (V).Loc = Best and then Units (V).MP > 0 then
-               J := Job_Of (Fid, Best);
+            if V >= 0 and then Units (V).Loc = Units (V).Target then
+               J := Job_Of (Fid, Units (V).Loc);
                if J /= W_None then
                   Start_Work (V, J);
                end if;
@@ -3027,86 +3366,301 @@ package body Colony is
          end;
          return;
       end if;
-      --  Garrison the unit with the highest defence already standing in an own city.
       declare
          Home : constant Integer := City_At (Units (U).Loc);
          Top : Integer := U;
+         Nb : Nbr_Arr;
+         NN : Natural;
+         Agg : Boolean;
+         Scan : Long_Float;
+         AS : Long_Float;
       begin
          if Home >= 0 and then Cities (Home).Fac = Fid and then not U_Civ (Units (U).Kind) then
             for O in 0 .. Unit_N - 1 loop
                if Units (O).Loc = Units (U).Loc and then Units (O).Fac = Fid
                  and then not U_Civ (Units (O).Kind)
-                 and then U_Def (Units (O).Kind) > U_Def (Units (Top).Kind)
+                 and then (U_Def (Units (O).Kind) > U_Def (Units (Top).Kind)
+                           or else (U_Def (Units (O).Kind) = U_Def (Units (Top).Kind)
+                                    and then Units (O).Id < Units (Top).Id))
                then
                   Top := O;
                end if;
             end loop;
             if Top = U then
+               Nbrs (Units (U).Loc, 1, NN, Nb);
+               for K in 0 .. NN - 1 loop
+                  declare
+                     Dfd : constant Integer := Best_Def (Nb (K), U);
+                     CC : constant Integer := City_At (Nb (K));
+                  begin
+                     if Dfd >= 0 and then CC >= 0 and then not At_War (Fid, Cities (CC).Fac) then
+                        null;
+                     elsif Dfd >= 0 and then U_Atk (Units (U).Kind) > 0
+                       and then Att_Str (U) > Def_Str (Dfd, U) * 1.3
+                     then
+                        if Step (U, Nb (K)) then
+                           return;
+                        end if;
+                     end if;
+                  end;
+               end loop;
                Units (U).Fort := True;
                return;
             end if;
          end if;
-      end;
-      Best := -1;
-      BD := 999;
-      for O in 0 .. Unit_N - 1 loop
-         if Units (O).Fac /= Fid and then Units (O).On_Ship < 0
-           and then Dist (Units (O).Loc, Units (U).Loc) < BD
-           and then Dist (Units (O).Loc, Units (U).Loc) <= 8
-         then
-            BD := Dist (Units (O).Loc, Units (U).Loc);
-            Best := Units (O).Loc;
+         if U_Atk (Units (U).Kind) > 0 and then War_Target (Fid) >= 0 and then Turn_N >= Grace then
+            declare
+               W, WD : Integer := -1;
+            begin
+               WD := 99;
+               for C in 0 .. City_N - 1 loop
+                  if Cities (C).UG and then Cities (C).Fac /= Fid
+                    and then Known_Owner (Fid, C) = War_Target (Fid)
+                    and then Dist (Cities (C).Loc, Units (U).Loc) < WD
+                  then
+                     WD := Dist (Cities (C).Loc, Units (U).Loc);
+                     W := C;
+                  end if;
+               end loop;
+               if W >= 0 and then WD <= 12 then
+                  Nbrs (Units (U).Loc, 1, NN, Nb);
+                  for K in 0 .. NN - 1 loop
+                     if Tiles (Nb (K)).Tun = Cities (W).Fac and then Can_Flood (Fid, Nb (K))
+                       and then Dist (Nb (K), Cities (W).Loc) <= 3 and then Units (U).MP > 0
+                       and then Rand < 0.5
+                     then
+                        if Flood_Tunnel (U, Nb (K)) then
+                           return;
+                        end if;
+                     end if;
+                  end loop;
+                  if WD = 1 then
+                     declare
+                        Can_Hit : constant Boolean :=
+                          Has_Tech (Fid, Tech_Kind'Pos (Sapper)) or else U_Atk (Units (U).Kind) >= 4
+                          or else Tiles (Units (U).Loc).Tun >= 0;
+                        D0 : constant Integer := Best_Def (Cities (W).Loc, U);
+                     begin
+                        if Can_Hit and then (D0 < 0 or else Att_Str (U) > Def_Str (D0, U) * 1.1) then
+                           if Step (U, Cities (W).Loc) then
+                              return;
+                           end if;
+                        end if;
+                        Units (U).Fort := True;
+                        return;
+                     end;
+                  end if;
+                  if Units (U).Id mod 3 = 0 then
+                     declare
+                        Tg, TD : Integer := -1;
+                     begin
+                        TD := 99;
+                        Nbrs (Cities (W).Loc, 1, NN, Nb);
+                        for K in 0 .. NN - 1 loop
+                           if Tiles (Nb (K)).Land and then City_At (Nb (K)) < 0 then
+                              declare
+                                 Busy : Boolean := False;
+                              begin
+                                 for O in 0 .. Unit_N - 1 loop
+                                    if Units (O).Loc = Nb (K) and then Units (O).Fac /= Fid then
+                                       Busy := True;
+                                    end if;
+                                 end loop;
+                                 if not Busy and then Dist (Nb (K), Units (U).Loc) < TD then
+                                    TD := Dist (Nb (K), Units (U).Loc);
+                                    Tg := Nb (K);
+                                 end if;
+                              end;
+                           end if;
+                        end loop;
+                        if Tg >= 0 then
+                           Move_Toward (U, Tg, 16);
+                           return;
+                        end if;
+                     end;
+                  end if;
+               end if;
+            end;
          end if;
-      end loop;
-      if Best < 0 and then (Turn_N >= Grace or else Factions (Fid).Plan = 2) then
-         for C in 0 .. City_N - 1 loop
-            if Cities (C).Fac /= Fid and then Dist (Cities (C).Loc, Units (U).Loc) < BD then
-               BD := Dist (Cities (C).Loc, Units (U).Loc);
-               Best := Cities (C).Loc;
-            end if;
-         end loop;
-         if BD > 16 then
-            Best := -1;
-         end if;
-      end if;
-      if Best >= 0 and then U_Atk (Units (U).Kind) > 0 then
-         Move_Toward (U, Best, 16);
-         return;
-      end if;
-      if Units (U).Kind = Scout or else RI (4) = 0 then
-         if Units (U).Target < 0 or else Units (U).Loc = Units (U).Target
-           or else Factions (Fid).Seen (Units (U).Target)
-         then
-            Units (U).Target := -1;
-            for K in 1 .. 30 loop
+         Agg := (Turn_N >= Grace and then (Slot_Key (Fid) = 0 or else Turn_N > 40))
+           or else Units (U).Kind = Scout or else Factions (Fid).Plan = 4 or else Factions (Fid).Plan = 2;
+         BFS (Units (U).Loc, Fid, (if Units (U).Kind = Scout then 8 else 16));
+         Best := -1;
+         BS := -1.0e9;
+         AS := Att_Str (U);
+         for I in 0 .. NTiles - 1 loop
+            if Dist_A (I) >= 0 and then (Occ_A (I) and 1) /= 0 then
                declare
-                  I : constant Integer := RI (NTiles);
+                  CC : constant Integer := City_At (I);
+                  Ow : Integer := Fid;
+                  Dv : Long_Float := -1.0;
+                  Dfd : Integer := -1;
+                  Seen_Foe : Boolean := False;
                begin
-                  if Tiles (I).Land and then not Factions (Fid).Seen (I) then
-                     Units (U).Target := I;
-                     exit;
+                  if CC >= 0 and then (Cities (CC).Fac = Fid or else Known_Owner (Fid, CC) >= 0) then
+                     Ow := Cities (CC).Fac;
+                  else
+                     for O in 0 .. Unit_N - 1 loop
+                        if Units (O).Fac /= Fid and then Units (O).Loc = I
+                          and then Factions (Fid).Vis (Units (O).Loc)
+                        then
+                           if not Seen_Foe then
+                              Ow := Units (O).Fac;
+                              Seen_Foe := True;
+                           end if;
+                           if Def_Str (O, U) > Dv then
+                              Dv := Def_Str (O, U);
+                              Dfd := O;
+                           end if;
+                        end if;
+                     end loop;
+                     if not Seen_Foe and then CC < 0 then
+                        Ow := Fid;
+                     end if;
+                  end if;
+                  if Ow /= Fid and then At_War (Fid, Ow) then
+                     declare
+                        Near_Tun : Boolean := False;
+                        Nb2 : Nbr_Arr;
+                        NN2 : Natural;
+                        Skip_Ug : Boolean;
+                     begin
+                        Nbrs (I, 1, NN2, Nb2);
+                        for K in 0 .. NN2 - 1 loop
+                           if Tiles (Nb2 (K)).Tun >= 0 then
+                              Near_Tun := True;
+                           end if;
+                        end loop;
+                        Skip_Ug := CC >= 0 and then Cities (CC).UG and then U_Atk (Units (U).Kind) < 4
+                          and then not Has_Tech (Fid, Tech_Kind'Pos (Sapper)) and then not Near_Tun;
+                     if not Skip_Ug then
+                        if not (CC >= 0 and then Turn_N < Grace)
+                          and then not (CC >= 0 and then Turn_N < JS_Round (Long_Float (Grace) * 0.6))
+                        then
+                           declare
+                              Close : Boolean := False;
+                           begin
+                              for C in 0 .. City_N - 1 loop
+                                 if Cities (C).Fac = Fid and then Dist (Cities (C).Loc, I) <= 4 then
+                                    Close := True;
+                                 end if;
+                              end loop;
+                              if Agg or else Close then
+                                 Scan := (if CC >= 0 then 15.0 else 5.0) - Long_Float (Dist_A (I)) * 1.5;
+                                 if War_Target (Fid) >= 0 and then Ow = War_Target (Fid) then
+                                    Scan := Scan + 12.0;
+                                 end if;
+                                 if War_City (Fid) = I then
+                                    Scan := Scan + 30.0;
+                                 end if;
+                                 if Dfd >= 0 then
+                                    Scan := Scan + (AS - Dv) * 4.0;
+                                    if Units (U).Kind = Scout and then Units (Dfd).Fac >= 0 then
+                                       Scan := Scan - 20.0;
+                                    end if;
+                                 end if;
+                                 if Scan > BS then
+                                    BS := Scan;
+                                    Best := I;
+                                 end if;
+                              end if;
+                           end;
+                        end if;
+                     end if;
+                     end;
                   end if;
                end;
+            end if;
+         end loop;
+         if Best >= 0 and then BS > -15.0 and then U_Atk (Units (U).Kind) > 0 then
+            if Units (U).Kind = Scout then
+               Move_Toward (U, Best, 16);
+            else
+               Move_Toward (U, Best, 16);
+            end if;
+            return;
+         end if;
+         if Factions (Fid).Plan = 4 and then War_Target (Fid) >= 0 and then U_Atk (Units (U).Kind) > 0 then
+            declare
+               Tc, Bd : Integer;
+            begin
+               Tc := War_City (Fid);
+               if Tc < 0 then
+                  Bd := 999999;
+                  for C in 0 .. City_N - 1 loop
+                     if Cities (C).Fac /= Fid and then Known_Owner (Fid, C) = War_Target (Fid)
+                       and then Dist (Cities (C).Loc, Units (U).Loc) < Bd
+                     then
+                        Bd := Dist (Cities (C).Loc, Units (U).Loc);
+                        Tc := Cities (C).Loc;
+                     end if;
+                  end loop;
+               end if;
+               if Tc >= 0 then
+                  Move_Toward (U, Tc, 60);
+                  return;
+               end if;
+            end;
+         end if;
+         if Units (U).Kind = Scout or else (not Agg and then RI (3) = 0) then
+            if Units (U).Target < 0 or else Units (U).Loc = Units (U).Target
+              or else (Units (U).Target in 0 .. NTiles - 1 and then Factions (Fid).Seen (Units (U).Target))
+            then
+               declare
+                  C2 : Integer := -1;
+               begin
+                  for K in 1 .. 30 loop
+                     declare
+                        I : constant Integer := RI (NTiles);
+                     begin
+                        if Tiles (I).Land and then not Factions (Fid).Seen (I) then
+                           C2 := I;
+                           exit;
+                        end if;
+                     end;
+                  end loop;
+                  if C2 < 0 then
+                     C2 := RI (NTiles);
+                  end if;
+                  Units (U).Target := (if Tiles (C2).Land then C2 else -1);
+               end;
+            end if;
+            if Units (U).Target >= 0 then
+               Move_Toward (U, Units (U).Target, 40);
+            end if;
+            return;
+         end if;
+         Best := -1;
+         BD := Integer'Last;
+         declare
+            Guard : Integer := 0;
+            Wv : Integer := Integer'Last;
+            V : Integer;
+         begin
+            for C in 0 .. City_N - 1 loop
+               if Cities (C).Fac = Fid then
+                  Guard := 0;
+                  for O in 0 .. Unit_N - 1 loop
+                     if Units (O).Fac = Fid and then not U_Civ (Units (O).Kind)
+                       and then Units (O).Loc = Cities (C).Loc
+                     then
+                        Guard := Guard + 1;
+                     end if;
+                  end loop;
+                  V := Guard * 10 + Dist (Cities (C).Loc, Units (U).Loc);
+                  if Best < 0 or else V < Wv then
+                     Wv := V;
+                     Best := Cities (C).Loc;
+                  end if;
+               end if;
             end loop;
+         end;
+         if Best >= 0 and then Best /= Units (U).Loc then
+            Move_Toward (U, Best, 30);
+         elsif Best >= 0 then
+            Units (U).Fort := True;
          end if;
-         if Units (U).Target >= 0 then
-            Move_Toward (U, Units (U).Target, 40);
-         end if;
-         return;
-      end if;
-      Best := -1;
-      BD := Integer'Last;
-      for C in 0 .. City_N - 1 loop
-         if Cities (C).Fac = Fid and then Dist (Cities (C).Loc, Units (U).Loc) < BD then
-            BD := Dist (Cities (C).Loc, Units (U).Loc);
-            Best := Cities (C).Loc;
-         end if;
-      end loop;
-      if Best >= 0 and then Best /= Units (U).Loc then
-         Move_Toward (U, Best, 30);
-      else
-         Units (U).Fort := True;
-      end if;
+      end;
    end AI_Unit;
 
    procedure Run_AI (Fid : Integer) is
@@ -3596,36 +4150,58 @@ package body Colony is
          end loop;
       end if;
       if Rule (3) then
-         Land_N := 0;
-         for I in 0 .. NTiles - 1 loop
-            if Tiles (I).Land then
-               Land_N := Land_N + 1;
-            end if;
-         end loop;
          Territory;
-         for F in 0 .. Fac_N - 1 loop
-            Owned := 0;
-            for I in 0 .. NTiles - 1 loop
-               if Tiles (I).Land and then Terr (I) = F then
-                  Owned := Owned + 1;
+         declare
+            Held : array (0 .. Max_Tiles - 1) of Boolean := (others => False);
+            Nb : Nbr_Arr;
+            NN : Natural;
+            Thr : Long_Float;
+         begin
+            for C in 0 .. City_N - 1 loop
+               if Cities (C).Sea then
+                  Nbrs (Cities (C).Loc, 2, NN, Nb);
+                  for K in 0 .. NN - 1 loop
+                     if not Tiles (Nb (K)).Land and then Terr (Nb (K)) = Cities (C).Fac then
+                        Held (Nb (K)) := True;
+                     end if;
+                  end loop;
                end if;
             end loop;
-            Share := Long_Float (Owned) / Long_Float (Integer'Max (1, Land_N));
-            if F in 0 .. 3 then
-               Land_Share (F) := Share;
-            end if;
-            if Share >= 0.5 then
-               Dom_Turns (F) := Dom_Turns (F) + 1;
+            Land_N := 0;
+            for I in 0 .. NTiles - 1 loop
+               if Tiles (I).Land or else Held (I) then
+                  Land_N := Land_N + 1;
+               end if;
+            end loop;
+            if Turn_N > 200 then
+               Thr := Long_Float'Max (0.4, 0.5 - Long_Float (Turn_N - 200) * 0.002);
             else
-               Dom_Turns (F) := 0;
+               Thr := 0.5;
             end if;
-            if Dom_Turns (F) >= 10 then
-               Winner := F;
-               Win_Type := 4;
-               Log ("T" & Img (Turn_N) & " dominion victory");
-               return;
-            end if;
-         end loop;
+            for F in 0 .. Fac_N - 1 loop
+               Owned := 0;
+               for I in 0 .. NTiles - 1 loop
+                  if (Tiles (I).Land or else Held (I)) and then Terr (I) = F then
+                     Owned := Owned + 1;
+                  end if;
+               end loop;
+               Share := Long_Float (Owned) / Long_Float (Integer'Max (1, Land_N));
+               if F in 0 .. 3 then
+                  Land_Share (F) := Long_Float (JS_Round (Share * 1000.0)) / 1000.0;
+               end if;
+               if Share >= Thr then
+                  Dom_Turns (F) := Dom_Turns (F) + 1;
+               else
+                  Dom_Turns (F) := 0;
+               end if;
+               if Dom_Turns (F) >= 10 then
+                  Winner := F;
+                  Win_Type := 4;
+                  Log ("T" & Img (Turn_N) & " dominion victory");
+                  return;
+               end if;
+            end loop;
+         end;
       end if;
       Score_Diplomacy;
       if Winner /= -2 then
@@ -6714,6 +7290,7 @@ package body Colony is
       Dig, Far, Aflood, Ally, Ob, Tlo, Thi, Surr, Leftu : Integer := -1;
       Rest_Code, Ghost_C, Wt, Wt2, Rush_Ok, Rjob, Rleft : Integer := -1;
       Aboard, Carried, Landed, Loaded, Dwin, Dtype, Cwin, Ctype : Integer := -1;
+      Sea_N, Dshare, Skiff_T, Tr_City, Tr_Cr, Col_T, Terra_T, Mil_T, Long_Ok : Integer := -1;
       Plans : String (1 .. 7) := "0,0,0,0";
    begin
       if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) /= 0 then
@@ -7292,6 +7869,229 @@ package body Colony is
          end if;
       end if;
 
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Sea := -1;
+         for I in 0 .. NTiles - 1 loop
+            if not Tiles (I).Land then
+               declare
+                  Nb : Nbr_Arr;
+                  NN : Natural;
+               begin
+                  Nbrs (I, 1, NN, Nb);
+                  for K in 0 .. NN - 1 loop
+                     if Tiles (Nb (K)).Land and then Sea < 0 then
+                        Sea := I;
+                     end if;
+                  end loop;
+               end;
+            end if;
+            exit when Sea >= 0;
+         end loop;
+         U := Make_Unit (0, Sea_Colonist, Sea);
+         if U >= 0 and then Found_City (U) then
+            Territory;
+            declare
+               Held : array (0 .. Max_Tiles - 1) of Boolean := (others => False);
+               Nb : Nbr_Arr;
+               NN : Natural;
+               Denom, Owned : Integer := 0;
+            begin
+               for C in 0 .. City_N - 1 loop
+                  if Cities (C).Sea then
+                     Nbrs (Cities (C).Loc, 2, NN, Nb);
+                     for K in 0 .. NN - 1 loop
+                        if not Tiles (Nb (K)).Land and then Terr (Nb (K)) = Cities (C).Fac then
+                           Held (Nb (K)) := True;
+                        end if;
+                     end loop;
+                  end if;
+               end loop;
+               Sea_N := 0;
+               for I in 0 .. NTiles - 1 loop
+                  if Held (I) then
+                     Sea_N := Sea_N + 1;
+                  end if;
+                  if Tiles (I).Land or else Held (I) then
+                     Denom := Denom + 1;
+                     if Terr (I) = 0 then
+                        Owned := Owned + 1;
+                     end if;
+                  end if;
+               end loop;
+               Dshare := JS_Round (Long_Float (Owned) / Long_Float (Integer'Max (1, Denom)) * 1000.0);
+            end;
+         else
+            Rest_Code := 7;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Sea := -1;
+         for I in 0 .. NTiles - 1 loop
+            if not Tiles (I).Land then
+               Sea := I;
+               exit;
+            end if;
+         end loop;
+         Ship := Make_Unit (0, Skiff, Sea);
+         if Ship >= 0 then
+            Update_Seen (0);
+            Skiff_Explore (Ship);
+            Skiff_T := Units (Ship).Target;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         declare
+            A, B, Bd : Integer := -1;
+            Seas : array (0 .. Max_Tiles - 1) of Integer;
+            NS : Natural := 0;
+            UA, UB, Home_C : Integer;
+            Before : Integer;
+         begin
+            for I in 0 .. NTiles - 1 loop
+               if not Tiles (I).Land then
+                  declare
+                     Nb : Nbr_Arr;
+                     NN : Natural;
+                     Coast : Boolean := False;
+                  begin
+                     Nbrs (I, 1, NN, Nb);
+                     for K in 0 .. NN - 1 loop
+                        if Tiles (Nb (K)).Land then
+                           Coast := True;
+                        end if;
+                     end loop;
+                     if Coast and then NS < Seas'Length then
+                        Seas (NS) := I;
+                        NS := NS + 1;
+                     end if;
+                  end;
+               end if;
+            end loop;
+            if NS > 0 then
+               A := Seas (0);
+               Bd := 99;
+               for K in 0 .. NS - 1 loop
+                  if Dist (A, Seas (K)) >= 6 and then Dist (A, Seas (K)) < Bd then
+                     Bd := Dist (A, Seas (K));
+                     B := Seas (K);
+                  end if;
+               end loop;
+            end if;
+            UA := Make_Unit (3, Sea_Colonist, A);
+            UB := Make_Unit (3, Sea_Colonist, B);
+            declare
+               Id_B : Integer := -1;
+            begin
+            if UB >= 0 then
+               Id_B := Units (UB).Id;
+            end if;
+            if UA >= 0 and then Id_B >= 0 and then Found_City (UA)
+              and then Find_Unit (Id_B) >= 0 and then Found_City (Find_Unit (Id_B))
+            then
+               Home_C := -1;
+               for C in 0 .. City_N - 1 loop
+                  if Cities (C).Loc = A then
+                     Home_C := C;
+                  end if;
+               end loop;
+               Ship := Make_Unit (3, Transport, A);
+               Before := Factions (3).Credits;
+               if Ship >= 0 then
+                  Trade_Run (Ship);
+                  Tr_City := Units (Ship).Trade_City;
+                  Tr_Cr := Factions (3).Credits - Before;
+               end if;
+               if Home_C < 0 then
+                  Rest_Code := 8;
+               end if;
+            else
+               Rest_Code := 8;
+            end if;
+            end;
+         end;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         for V in 0 .. Unit_N - 1 loop
+            Units (V).MP := 0;
+         end loop;
+         U := -1;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = 0 and then Units (V).Kind = Colonist then
+               U := V;
+               exit;
+            end if;
+         end loop;
+         if U >= 0 then
+            Units (U).MP := 3;
+            declare
+               Id : constant Integer := Units (U).Id;
+            begin
+               AI_Unit (U);
+               U := Find_Unit (Id);
+               Col_T := (if U < 0 then -2 else Units (U).Target);
+            end;
+         end if;
+         U := -1;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = 0 and then Units (V).Kind = Trooper then
+               U := V;
+               exit;
+            end if;
+         end loop;
+         if U >= 0 then
+            Units (U).MP := 3;
+            declare
+               Id : constant Integer := Units (U).Id;
+               Was : constant Integer := Units (U).Loc;
+            begin
+               AI_Unit (U);
+               U := Find_Unit (Id);
+               if U < 0 then
+                  Mil_T := -1;
+               elsif Units (U).Loc /= Was then
+                  Mil_T := Units (U).Loc;
+               else
+                  Mil_T := Units (U).Target;
+               end if;
+            end;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         U := -1;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = 0 and then Units (V).Kind = Colonist then
+               U := V;
+               exit;
+            end if;
+         end loop;
+         if U >= 0 and then Found_City (U) then
+            for V in 0 .. Unit_N - 1 loop
+               Units (V).MP := 0;
+            end loop;
+            for V in 0 .. Unit_N - 1 loop
+               if Units (V).Fac = 0 and then Units (V).Kind = Terraformer then
+                  Units (V).MP := 3;
+                  AI_Unit (V);
+                  if Units (V).Work /= W_None then
+                     Terra_T := Units (V).Loc;
+                  else
+                     Terra_T := Units (V).Target;
+                  end if;
+                  exit;
+               end if;
+            end loop;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         for K in 1 .. 25 loop
+            End_Turn;
+         end loop;
+         Long_Ok := (if Turn_N = 26 and then City_N >= 2 then 1 else 0);
+         if Long_Ok /= 1 then
+            Rest_Code := 9;
+         end if;
+      end if;
+
       RLen := 0;
       Add_R ("MECH ");
       Add_R (if Code = 0 then "status=pass" else "status=fail");
@@ -7344,6 +8144,15 @@ package body Colony is
       Add_R (" dtype="); Add_R (Img (Dtype));
       Add_R (" cwin="); Add_R (Img (Cwin));
       Add_R (" ctype="); Add_R (Img (Ctype));
+      Add_R (" sea="); Add_R (Img (Sea_N));
+      Add_R (" dshare="); Add_R (Img (Dshare));
+      Add_R (" skiff="); Add_R (Img (Skiff_T));
+      Add_R (" trcity="); Add_R (Img (Tr_City));
+      Add_R (" trcr="); Add_R (Img (Tr_Cr));
+      Add_R (" col="); Add_R (Img (Col_T));
+      Add_R (" terra="); Add_R (Img (Terra_T));
+      Add_R (" mil="); Add_R (Img (Mil_T));
+      Add_R (" long="); Add_R (Img (Long_Ok));
       if Code = 0 then
          return Rest_Code;
       end if;

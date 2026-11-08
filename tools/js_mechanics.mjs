@@ -366,6 +366,94 @@ const planName = { expand: 0, econ: 1, military: 2, project: 3, strike: 4 };
   rest.cwin = S.winner == null ? -1 : S.winner;
   rest.ctype = S.winType === "cooperative" ? 8 : 0;
 }
+{
+  const S = game();
+  let sea = -1;
+  for (let i = 0; i < S.tiles.length; i++) {
+    if (!S.tiles[i].land && G.nbrs(S, i).some(n => S.tiles[n].land)) { sea = i; break; }
+  }
+  const u = G.makeUnit(S, 0, "seacolony", sea);
+  const founded = G.act(S, { type: "found", u: u.id, f: 0 });
+  if (!founded.ok) rest.code = 7;
+  else {
+    const tr = G.territory(S), held = G.seaHeld(S, tr);
+    let seaN = 0, denom = 0, owned = 0;
+    for (let i = 0; i < S.tiles.length; i++) {
+      if (held[i]) seaN++;
+      if (S.tiles[i].land || held[i]) { denom++; if (tr[i] === 0) owned++; }
+    }
+    rest.sea = seaN;
+    rest.dshare = Math.round(owned / denom * 1000);
+  }
+}
+{
+  const S = game();
+  let sea = -1;
+  for (let i = 0; i < S.tiles.length; i++) if (!S.tiles[i].land) { sea = i; break; }
+  const ship = G.makeUnit(S, 0, "skiff", sea);
+  G.updateSeen(S, 0);
+  G.aiShip(S, ship);
+  rest.skiff = ship.tgt == null ? -1 : ship.tgt;
+}
+{
+  const S = game();
+  const seas = [];
+  for (let i = 0; i < S.tiles.length; i++) {
+    if (!S.tiles[i].land && G.nbrs(S, i).some(n => S.tiles[n].land)) seas.push(i);
+  }
+  const a = seas[0];
+  let b = -1, bd = 99;
+  for (const y of seas) {
+    const d = G.dist(S, a, y);
+    if (d >= 6 && d < bd) { bd = d; b = y; }
+  }
+  const ua = G.makeUnit(S, 3, "seacolony", a);
+  const ub = G.makeUnit(S, 3, "seacolony", b);
+  const fa = G.act(S, { type: "found", u: ua.id, f: 3 });
+  const fb = G.act(S, { type: "found", u: ub.id, f: 3 });
+  if (!fa.ok || !fb.ok) rest.code = 8;
+  else {
+    const home = S.cities.find(c => c.at === a);
+    const ship = G.makeUnit(S, 3, "transport", a);
+    ship.trade = null;
+    const before = S.factions[3].credits;
+    const B = G.bfs(S, ship.at, 3, 40, false, 1);
+    G.tradeRun(S, ship, B, () => home.at);
+    rest.trcity = ship.trade ? ship.trade.city : -1;
+    rest.trcr = S.factions[3].credits - before;
+  }
+}
+{
+  const S = game();
+  for (const u of S.units) u.mp = 0;
+  const col = S.units.find(u => u.f === 0 && u.type === "colonist");
+  const troop = S.units.find(u => u.f === 0 && u.type === "trooper");
+  col.mp = 3;
+  G.aiUnit(S, col);
+  rest.col = S.units.includes(col) ? (col.tgt == null ? -1 : col.tgt) : -2;
+  troop.mp = 3;
+  const at = troop.at;
+  G.aiUnit(S, troop);
+  rest.mil = troop.at === at ? (troop.tgt == null ? -1 : troop.tgt) : troop.at;
+}
+{
+  const S = game();
+  const col = S.units.find(u => u.f === 0 && u.type === "colonist");
+  const terra = S.units.find(u => u.f === 0 && u.type === "terraformer");
+  G.act(S, { type: "found", u: col.id, f: 0 });
+  for (const u of S.units) u.mp = 0;
+  terra.mp = 3;
+  G.aiUnit(S, terra);
+  rest.terra = terra.work ? terra.at : (terra.tgt == null ? -1 : terra.tgt);
+}
+{
+  const S = game();
+  for (let i = 0; i < 25; i++) G.endTurn(S);
+  rest.long = S.turn === 26 && S.cities.length >= 2 ? 1 : 0;
+  rest.lc = S.cities.length;
+  rest.lp = S.cities.reduce((a, c) => a + c.pop, 0);
+  rest.lu = S.units.length;
+}
 const rstatus = rest.code === 0 ? "status=pass" : "status=fail";
 console.log([
   "REST", rstatus, "code=" + rest.code,
@@ -373,6 +461,9 @@ console.log([
   "wt=" + rest.wt, "wt2=" + rest.wt2,
   "rush=" + rest.rush, "rjob=" + rest.rjob, "rleft=" + rest.rleft,
   "aboard=" + rest.aboard, "carried=" + rest.carried, "landed=" + rest.landed, "loaded=" + rest.loaded,
-  "dwin=" + rest.dwin, "dtype=" + rest.dtype, "cwin=" + rest.cwin, "ctype=" + rest.ctype
+  "dwin=" + rest.dwin, "dtype=" + rest.dtype, "cwin=" + rest.cwin, "ctype=" + rest.ctype,
+  "sea=" + rest.sea, "dshare=" + rest.dshare, "skiff=" + rest.skiff,
+  "trcity=" + rest.trcity, "trcr=" + rest.trcr,
+  "col=" + rest.col, "terra=" + rest.terra, "mil=" + rest.mil, "long=" + rest.long
 ].join(" "));
 if (out.code !== 0 || rest.code !== 0) process.exit(1);
