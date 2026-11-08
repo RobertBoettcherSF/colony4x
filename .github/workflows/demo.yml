@@ -1,0 +1,16 @@
+name: Ada WebAssembly demo
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y gnat gprbuild lld rpm2cpio cpio unzip clang
+      - name: Toolchain
+        run: ./tools/get-toolchain.sh
+      - name: Build and compare native with WebAssembly
+        run: ./build.sh

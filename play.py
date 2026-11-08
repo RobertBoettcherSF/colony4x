@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""Colony4X launcher: serves this folder on localhost, opens the browser, and
-writes the live feedback log the game POSTs after every action.
-Usage:  python3 play.py [--port 8642] [--no-browser]"""
+"""Colony4X launcher: serves this folder on localhost and, when asked, writes
+the live feedback log the page POSTs after actions.
+
+The public page does not call /api/ping. This server still answers /api/ping
+and /api/log. Opening with ?live=1 (the default here) turns that log on.
+
+Usage:
+  python3 play.py [--port 8642] [--no-browser] [--classic]
+  --classic   open classic.html, the previous JavaScript edition
+"""
 import http.server, json, os, re, sys, threading, webbrowser, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(sys.argv[sys.argv.index('--port') + 1]) if '--port' in sys.argv else 8642
@@ -38,9 +45,11 @@ class H(http.server.SimpleHTTPRequestHandler):
 
 def main():
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', PORT), H)
-    url = 'http://127.0.0.1:%d/index.html' % PORT
+    page = 'classic.html' if '--classic' in sys.argv else 'index.html'
+    url = 'http://127.0.0.1:%d/%s?live=1' % (PORT, page)
     print('Colony4X running at', url)
     print('Live feedback log:', os.path.join(HERE, 'col-feedback.json'), '(+ one col-feedback-<session>.json per session)')
+    print('Without ?live=1 the page does not contact this server.')
     print('Press Ctrl+C to stop.')
     if '--no-browser' not in sys.argv:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
