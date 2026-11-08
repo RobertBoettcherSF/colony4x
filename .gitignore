@@ -1,0 +1,8 @@
+toolchain/
+obj/
+scenario
+*.ali
+*.o
+b~*
+col-feedback*.json
+.alire/

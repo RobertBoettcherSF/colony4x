@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colony4X</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; background: #0d1117; color: #d8dee9; font: 14px system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+button, select { background: #21262d; color: #d8dee9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+button:hover { background: #30363d; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: #238636; border-color: #2ea043; color: #fff; font-weight: 700; font-size: 18px; padding: 12px 22px; }
+button.quiet { background: transparent; border-color: transparent; color: #8b949e; }
+#top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 10px; background: #161b22; border-bottom: 1px solid #30363d; }
+#top b { font-size: 16px; }
+.sp { flex: 1; }
+#main { flex: 1; display: flex; min-height: 0; }
+#mapwrap { flex: 1; overflow: auto; background: #000; }
+#map { display: block; image-rendering: pixelated; }
+#side { width: 320px; max-width: 40vw; background: #161b22; border-left: 1px solid #30363d; padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+#feed { font-size: 12px; color: #9da7b3; }
+#feed div { border-bottom: 1px solid #21262d; padding: 3px 0; }
+.y { margin-right: 8px; } .n { color: #7ee787; } .m { color: #d2a8ff; } .e { color: #ffd33d; }
+.small { color: #8b949e; font-size: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 4px; }
+#landing { position: fixed; inset: 0; background: rgba(13,17,23,.94); display: flex; align-items: center; justify-content: center; z-index: 5; }
+#card { max-width: 520px; padding: 28px; text-align: center; }
+#card h1 { margin: 0 0 8px; font-size: 40px; letter-spacing: .02em; }
+#card p { line-height: 1.45; }
+#watchBtn { margin-top: 8px; }
+#errorBox { position: fixed; inset: 0; background: #0d1117; color: #ffb4b4; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 24px; }
+#errorBox[hidden], #landing[hidden], #toast[hidden], #modal[hidden] { display: none !important; }
+#errorBox div { max-width: 560px; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #238636; color: #fff; padding: 10px 16px; border-radius: 8px; z-index: 30; font-weight: 700; }
+#toast.bad { background: #b62324; }
+#modal { position: fixed; inset: 0; background: #000a; z-index: 15; display: flex; align-items: center; justify-content: center; }
+#mbox { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; max-width: 640px; max-height: 80vh; overflow: auto; }
+.tech { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 4px 0; }
+.tech.on { border-color: #2ea043; cursor: pointer; }
+.tech.known { opacity: .55; }
+kbd { background: #30363d; border-radius: 3px; padding: 0 4px; }
+#liveInd { color: #8b949e; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="errorBox" hidden><div><h2>Colony4X did not start</h2><p id="errorText"></p><p class="small">The rules are an Ada program compiled to WebAssembly. This page does not contain a JavaScript copy of the game, so there is nothing else to run.</p></div></div>
+<div id="top">
+  <b>Colony4X</b>
+  <span id="stat">Turn <span id="turnLabel">—</span> · <span id="cityLabel">0 cities</span></span>
+  <span class="sp"></span>
+  <span id="speeds">
+    <button id="sp0" type="button">Pause</button>
+    <button id="sp1" type="button">1×</button>
+    <button id="sp2" type="button">Fast</button>
+    <button id="sp3" type="button">Max</button>
+  </span>
+  <label><input id="followCb" type="checkbox" checked> Follow</label>
+  <label><input id="revealCb" type="checkbox"> Reveal</label>
+  <button id="takeBtn" type="button">Take control</button>
+  <button id="researchBtn" type="button">Research</button>
+  <button id="policyBtn" type="button">Policy</button>
+  <button id="foundBtn" type="button">Found city</button>
+  <button id="endBtn" type="button">End turn</button>
+  <button id="helpBtn" type="button">Help</button>
+  <button id="logBtn" type="button">Save log</button>
+  <span id="liveInd">live log: off</span>
+</div>
+<div id="main">
+  <div id="mapwrap"><canvas id="map"></canvas></div>
+  <aside id="side">
+    <div id="sel" class="small">Choose Watch to see a colony grow, or Play to give the orders yourself.</div>
+    <h4 style="margin:8px 0 4px">Events</h4>
+    <div id="feed"></div>
+  </aside>
+</div>
+<div id="landing">
+  <div id="card">
+    <h1>Colony4X</h1>
+    <p>Four factions race to colonise an alien world: cities, research, fungus and war.</p>
+    <p class="small">The rules run in Ada, compiled to WebAssembly. This page only draws the map.</p>
+    <p><button id="watchBtn" class="primary" type="button" disabled>Watch a game</button></p>
+    <p><button id="playBtn" class="quiet" type="button" disabled>Play yourself</button></p>
+    <p class="small" id="engineLine">Loading the Ada engine…</p>
+  </div>
+</div>
+<div id="toast" hidden></div>
+<div id="modal" hidden><div id="mbox"></div></div>
+<script>
+const WASM_B64 = "__WASM_BASE64__";
+const BUILD_ID = "__BUILD_ID__";
+const T = 22;
+const ACT = { end:1, move:2, goto:3, found:4, skip:5, fort:6, disband:7, research:8, labs:9, queue:10, unqueue:11, buy:12, terra:13, control:14, hand:15, policy:16 };
+const RULES = 143;
+const cv = document.getElementById("map");
+const ctx = cv.getContext("2d");
+const $ = id => document.getElementById(id);
+let api = null, base = 0, speed = 0, timer = null, follow = true, reveal = false;
+let selUnit = -1, selCity = -1, lastCityId = -1, human = -1, winner = -2;
+let live = false;
+
+function fail(msg) {
+  $("errorText").textContent = String(msg || "Unknown engine error");
+  $("errorBox").hidden = false;
+  $("watchBtn").disabled = true;
+  $("playBtn").disabled = true;
+  if (timer) clearTimeout(timer);
+  speed = 0;
+}
+function toast(t, kind) {
+  const el = $("toast");
+  el.textContent = t;
+  el.className = kind === "bad" ? "bad" : "";
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.hidden = true; }, kind === "bad" ? 2400 : 3200);
+}
+function mem() { return api.memory.buffer; }
+function view() { return new DataView(mem()); }
+function i32(word) { return view().getInt32(base + word * 4, true); }
+function u32(word) { return view().getUint32(base + word * 4, true); }
+function bytes(off, n) { return new Uint8Array(mem(), off, n); }
+function text(kind, a = 0, b = 0) {
+  const n = api.c4x_text(kind, a | 0, b | 0);
+  const p = api.c4x_text_ptr() >>> 0;
+  return new TextDecoder().decode(new Uint8Array(mem(), p, n));
+}
+function refresh() {
+  const n = api.c4x_frame();
+  base = api.c4x_frame_ptr() >>> 0;
+  if (n < 128 || u32(0) !== 0x58344C43 || i32(1) !== 1) {
+    fail("The Ada engine returned a frame this page does not understand.");
+    return false;
+  }
+  return true;
+}
+function W() { return i32(3); }
+function H() { return i32(4); }
+function facN() { return i32(5); }
+function cityN() { return i32(6); }
+function unitN() { return i32(7); }
+function dataStart() { return i32(28); }
+function facAt(i) { return base + dataStart() + i * i32(24) * 4; }
+function cityAtWord(i) {
+  return base + dataStart() + facN() * i32(24) * 4 + i * i32(25) * 4;
+}
+function unitAtWord(i) {
+  return base + dataStart() + facN() * i32(24) * 4 + cityN() * i32(25) * 4 + i * i32(26) * 4;
+}
+function ri(addr, word) { return new DataView(mem()).getInt32(addr + word * 4, true); }
+function ru(addr, word) { return new DataView(mem()).getUint32(addr + word * 4, true); }
+function tileWord(i) {
+  const off = i32(29);
+  return new DataView(mem()).getUint32(base + off + i * 4, true);
+}
+function fogByte(i) { return new Uint8Array(mem(), base + i32(30), W() * H())[i]; }
+function memByte(i) { return new Uint8Array(mem(), base + i32(31), W() * H())[i]; }
+
+function colorOf(key) {
+  const names = ["#e0553a", "#4aa3ff", "#5fd35f", "#e6c34a"];
+  return names[key] || "#888";
+}
+function tilePaint(word, memv) {
+  const land = word & 1, moist = (word >> 1) & 3, rock = (word >> 3) & 3;
+  let fung = (word >> 5) & 1, imp = (word >> 7) & 3;
+  const elev = (word >> 9) & 127;
+  if (memv != null) { fung = memv & 1; imp = (memv >> 2) & 3; }
+  if (!land) return "#14326e";
+  if (fung) return "#7a2f6e";
+  const g = [[150, 130, 90], [95, 135, 70], [50, 110, 60]][moist] || [95, 135, 70];
+  const k = 1 - rock * 0.12 + (elev / 100) * 0.15;
+  return "rgb(" + (g[0] * k | 0) + "," + (g[1] * k | 0) + "," + (g[2] * k | 0) + ")";
+}
+function draw() {
+  const w = W(), h = H();
+  if (!w || !h) return;
+  cv.width = w * T; cv.height = h * T;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const viewer = i32(13);
+  for (let i = 0; i < w * h; i++) {
+    const fog = viewer < 0 ? 3 : fogByte(i);
+    const x = (i % w) * T, y = ((i / w) | 0) * T;
+    if ((fog & 1) === 0) { ctx.fillStyle = "#05070b"; ctx.fillRect(x, y, T, T); continue; }
+    const seenOnly = (fog & 2) === 0;
+    ctx.globalAlpha = seenOnly ? 0.55 : 1;
+    ctx.fillStyle = tilePaint(tileWord(i), seenOnly ? memByte(i) : null);
+    ctx.fillRect(x, y, T, T);
+    const imp = seenOnly ? (memByte(i) >> 2) & 3 : (tileWord(i) >> 7) & 3;
+    if (imp) {
+      ctx.fillStyle = ["", "#c4e07a", "#c9b27c", "#ffe08a"][imp];
+      ctx.fillRect(x + 8, y + 8, 6, 6);
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.lineWidth = 2;
+  for (let i = 0; i < w * h; i++) {
+    const owner = (tileWord(i) >> 16) & 7;
+    if (!owner) continue;
+    const fog = viewer < 0 ? 3 : fogByte(i);
+    if ((fog & 2) === 0) continue;
+    const x = i % w, y = (i / w) | 0;
+    ctx.strokeStyle = colorOf(ri(facAt(owner - 1), 0));
+    ctx.beginPath();
+    const edge = (nx, ny, x1, y1, x2, y2) => {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h || ((tileWord(ny * w + nx) >> 16) & 7) !== owner) {
+        ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+      }
+    };
+    edge(x, y - 1, x * T, y * T, (x + 1) * T, y * T);
+    edge(x, y + 1, x * T, (y + 1) * T, (x + 1) * T, (y + 1) * T);
+    edge(x - 1, y, x * T, y * T, x * T, (y + 1) * T);
+    edge(x + 1, y, (x + 1) * T, y * T, (x + 1) * T, (y + 1) * T);
+    ctx.stroke();
+  }
+  for (let c = 0; c < cityN(); c++) {
+    const at = ri(cityAtWord(c), 2);
+    const fog = viewer < 0 ? 3 : fogByte(at);
+    if ((fog & 1) === 0) continue;
+    if ((fog & 2) === 0 && ri(cityAtWord(c), 1) !== human) continue;
+    const x = (at % w) * T, y = ((at / w) | 0) * T;
+    const key = ri(facAt(ri(cityAtWord(c), 1)), 0);
+    ctx.fillStyle = colorOf(key);
+    ctx.fillRect(x + 3, y + 3, T - 6, T - 6);
+    ctx.fillStyle = "#000";
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(String(ri(cityAtWord(c), 3)), x + T / 2, y + T / 2);
+    if (c === selCity) { ctx.strokeStyle = "#fff"; ctx.strokeRect(x + 1, y + 1, T - 2, T - 2); }
+  }
+  const drawn = {};
+  for (let u = 0; u < unitN(); u++) {
+    const at = ri(unitAtWord(u), 3);
+    const fac = ri(unitAtWord(u), 1);
+    const fog = viewer < 0 ? 3 : fogByte(at);
+    if (fac !== human && (fog & 2) === 0) continue;
+    if (drawn[at] && u !== selUnit) continue;
+    drawn[at] = 1;
+    const x = (at % w) * T, y = ((at / w) | 0) * T;
+    const kind = ri(unitAtWord(u), 2);
+    ctx.beginPath();
+    ctx.fillStyle = fac < 0 ? "#b04ad0" : colorOf(ri(facAt(fac), 0));
+    ctx.arc(x + T / 2, y + T / 2, T / 2 - 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = u === selUnit ? "#ff0" : "#000";
+    ctx.stroke();
+    ctx.fillStyle = "#111";
+    ctx.font = "bold 11px sans-serif";
+    ctx.fillText(text(11, kind), x + T / 2, y + T / 2);
+  }
+}
+function feed() {
+  const el = $("feed");
+  el.innerHTML = "";
+  const n = Math.min(i32(17), 14);
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement("div");
+    d.textContent = text(7, i);
+    el.appendChild(d);
+  }
+}
+function hud() {
+  human = i32(8);
+  winner = i32(9);
+  let cities = 0, bits = "";
+  for (let f = 0; f < facN(); f++) {
+    const c = ri(facAt(f), 8);
+    cities += c;
+    const key = ri(facAt(f), 0);
+    bits += (f ? " · " : "") + text(1, key).split(" ")[0] + " " + c;
+  }
+  const win = winner === -2 ? "" : " · <b>" + (winner < 0 ? "extinction" : text(1, ri(facAt(winner), 0)) + " wins by " + text(12, i32(10))) + "</b>";
+  $("stat").innerHTML = "Turn <b id='turnLabel'>" + i32(2) + "</b> · <span id='cityLabel'>" + cities + " cities</span> · " + bits + " · seed " + u32(11) + win;
+  $("foundBtn").disabled = selUnit < 0;
+  $("endBtn").disabled = human < 0 || winner !== -2;
+  $("takeBtn").textContent = human >= 0 ? "Hand back" : "Take control";
+  const speeds = $("speeds").children;
+  for (let i = 0; i < 4; i++) speeds[i].style.outline = i === speed ? "2px solid #a371f7" : "";
+  if (follow) {
+    let at = -1;
+    if (lastCityId >= 0) {
+      for (let c = 0; c < cityN(); c++) if (ri(cityAtWord(c), 0) === lastCityId) at = ri(cityAtWord(c), 2);
+    }
+    if (at < 0 && unitN() > 0) at = ri(unitAtWord(0), 3);
+    if (at >= 0) {
+      const wrap = $("mapwrap");
+      wrap.scrollLeft = (at % W()) * T - wrap.clientWidth / 2;
+      wrap.scrollTop = ((at / W()) | 0) * T - wrap.clientHeight / 2;
+    }
+  }
+}
+function panel() {
+  const el = $("sel");
+  if (selCity >= 0 && selCity < cityN()) {
+    const a = cityAtWord(selCity);
+    const name = text(3, selCity);
+    const fac = ri(a, 1);
+    el.innerHTML = "<h3 style='margin:0'>" + name + "</h3><div class='small'>" + text(1, ri(facAt(fac), 0))
+      + " · pop " + ri(a, 3) + "/" + ri(a, 4) + " · morale " + (ri(a, 13) / 10).toFixed(1) + "</div>"
+      + "<div><span class='y n'>●" + ri(a, 9) + " nutr</span><span class='y m'>●" + ri(a, 10) + " min</span><span class='y e'>●" + ri(a, 11) + " energy</span></div>"
+      + "<div class='small'>Food " + ri(a, 5) + "/" + ri(a, 6) + " · production " + ri(a, 7) + (ri(a, 8) ? "/" + ri(a, 8) : "") + "</div>";
+    if (fac === human) {
+      let q = "<div class='small'>Queue</div>";
+      for (let i = 0; i < ri(a, 14); i++) {
+        const code = ri(a, 15 + i);
+        const label = code >= 100 ? text(6, code - 100) : text(4, code);
+        q += "<div>" + (i + 1) + ". " + label + " <button data-unq='" + i + "' type='button'>x</button></div>";
+      }
+      if (ri(a, 14)) q += "<button id='buyBtn' type='button'>Buy now</button>";
+      q += "<div class='row' id='buildRow'></div>";
+      el.innerHTML += q;
+      const row = $("buildRow");
+      const n = api.c4x_option_count(1, selCity);
+      for (let i = 0; i < n; i++) {
+        const code = api.c4x_option(1, selCity, i);
+        const b = document.createElement("button");
+        b.type = "button";
+        const label = code >= 100 ? text(6, code - 100) : text(4, code);
+        const cost = code >= 0 && code < 100 ? api.c4x_stat(code, 1) : "";
+        b.textContent = label + (cost ? " (" + cost + ")" : "");
+        b.dataset.q = String(code);
+        row.appendChild(b);
+      }
+    }
+    return;
+  }
+  if (selUnit >= 0 && selUnit < unitN()) {
+    const a = unitAtWord(selUnit);
+    const kind = ri(a, 2), fac = ri(a, 1);
+    el.innerHTML = "<h3 style='margin:0'>" + text(4, kind) + "</h3><div class='small'>"
+      + (fac < 0 ? "Natives" : text(1, ri(facAt(fac), 0)))
+      + " · HP " + ri(a, 4) + " · moves " + (ri(a, 5) / 3).toFixed(1) + "</div>";
+    return;
+  }
+  el.innerHTML = "<div class='small'>Click a unit or a city. Arrows move, B founds, Enter ends the turn.</div>";
+}
+function show() {
+  if (!refresh()) return;
+  let newest = -1;
+  for (let c = 0; c < cityN(); c++) newest = Math.max(newest, ri(cityAtWord(c), 0));
+  if (newest !== lastCityId) lastCityId = newest;
+  draw();
+  feed();
+  hud();
+  panel();
+  if (live) postLog("tick");
+}
+function act(code, a, b) {
+  const r = api.c4x_act(code, a | 0, b | 0, 0);
+  show();
+  if (r !== 0) toast(text(8) || "The Ada engine rejected that order", "bad");
+  return r;
+}
+function schedule() {
+  clearTimeout(timer);
+  const ms = [null, 700, 220, 30][speed];
+  if (ms == null || human >= 0 || winner !== -2) return;
+  timer = setTimeout(() => {
+    const before = i32(2);
+    const r = api.c4x_act(ACT.end, -1, 0, 0);
+    show();
+    if (r !== 0) { toast(text(8) || "End turn failed", "bad"); speed = 0; hud(); return; }
+    if (i32(2) === before && i32(9) === -2) {
+      fail("The Ada engine accepted End turn but the turn counter did not move.");
+      return;
+    }
+    schedule();
+  }, ms);
+}
+function setSpeed(k) {
+  if (human >= 0 && k > 0) { toast("Hand the faction back to the AI before autoplay", "bad"); return; }
+  speed = k;
+  hud();
+  schedule();
+}
+function start(allAI) {
+  $("landing").hidden = true;
+  reveal = !!allAI;
+  $("revealCb").checked = reveal;
+  const r = api.c4x_new(7919, 36, 24, allAI ? 0 : 1, 3, allAI ? 1 : 0, 2, RULES);
+  if (r !== 0) { toast(text(8) || "Could not start", "bad"); $("landing").hidden = false; return; }
+  if (reveal) api.c4x_set_viewer(-1);
+  if (!refresh()) return;
+  selUnit = -1; selCity = -1;
+  if (!allAI) {
+    for (let u = 0; u < unitN(); u++) if (ri(unitAtWord(u), 1) === i32(8) && ri(unitAtWord(u), 2) === 0) { selUnit = u; break; }
+  }
+  show();
+  if (!allAI) toast("You are the Lumen Collective. Found a city with the selected colonist.");
+  setSpeed(allAI ? 2 : 0);
+}
+function tileOf(ev) {
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((ev.clientX - r.left) / T);
+  const y = Math.floor((ev.clientY - r.top) / T);
+  if (x < 0 || y < 0 || x >= W() || y >= H()) return -1;
+  return y * W() + x;
+}
+function unitOn(tile, mine) {
+  let hit = -1;
+  for (let u = 0; u < unitN(); u++) {
+    if (ri(unitAtWord(u), 3) !== tile) continue;
+    const fac = ri(unitAtWord(u), 1);
+    if (mine && fac !== human) continue;
+    hit = u;
+  }
+  return hit;
+}
+cv.addEventListener("click", ev => {
+  const t = tileOf(ev);
+  if (t < 0) return;
+  if (selUnit >= 0 && selUnit < unitN() && ri(unitAtWord(selUnit), 1) === human) {
+    const at = ri(unitAtWord(selUnit), 3);
+    if (t !== at) {
+      const dx = Math.abs((t % W()) - (at % W())), dy = Math.abs(((t / W()) | 0) - ((at / W()) | 0));
+      const id = ri(unitAtWord(selUnit), 0);
+      act(dx <= 1 && dy <= 1 && (dx || dy) ? ACT.move : ACT.goto, id, t);
+      return;
+    }
+  }
+  const mine = unitOn(t, true);
+  selCity = -1; selUnit = -1;
+  if (mine >= 0) selUnit = mine;
+  else {
+    for (let c = 0; c < cityN(); c++) if (ri(cityAtWord(c), 2) === t) selCity = c;
+    if (selCity < 0) selUnit = unitOn(t, false);
+  }
+  panel();
+  draw();
+});
+$("side").addEventListener("click", ev => {
+  const t = ev.target;
+  if (t.dataset && t.dataset.q != null) {
+    if (selCity < 0) return;
+    act(ACT.queue, ri(cityAtWord(selCity), 0), +t.dataset.q);
+  } else if (t.dataset && t.dataset.unq != null && selCity >= 0) {
+    act(ACT.unqueue, ri(cityAtWord(selCity), 0), +t.dataset.unq);
+  } else if (t.id === "buyBtn" && selCity >= 0) {
+    act(ACT.buy, ri(cityAtWord(selCity), 0), 0);
+  }
+});
+function modal(html) {
+  $("mbox").innerHTML = html;
+  $("modal").hidden = false;
+}
+$("modal").addEventListener("click", ev => { if (ev.target.id === "modal") $("modal").hidden = true; });
+$("mbox").addEventListener("click", ev => {
+  const t = ev.target;
+  if (t.dataset.close != null) $("modal").hidden = true;
+  if (t.dataset.tech != null) { act(ACT.research, +t.dataset.tech, 0); research(); }
+  if (t.dataset.pol != null) {
+    const [ax, v] = t.dataset.pol.split(":");
+    act(ACT.policy, +ax, +v);
+    policy();
+  }
+  if (t.dataset.ctrl != null) {
+    act(ACT.control, +t.dataset.ctrl, 0);
+    speed = 0;
+    reveal = false;
+    $("revealCb").checked = false;
+    $("modal").hidden = true;
+    show();
+  }
+});
+function research() {
+  if (human < 0) { toast("Take control of a faction first", "bad"); return; }
+  let h = "<h3>Research</h3><p class='small'>Click a tech the engine marks available. Cost " + "comes from Ada.</p>";
+  for (let t = 0; t < 22; t++) {
+    const st = api.c4x_tech_state(human, t);
+    const cls = st === 1 || st === 3 ? "on" : st === 2 ? "known" : "";
+    h += "<div class='tech " + cls + "' " + (st === 1 ? "data-tech='" + t + "'" : "") + "><b>" + text(5, t) + "</b>"
+      + (st === 3 ? " · researching" : st === 2 ? " · known" : "")
+      + "<div class='small'>" + text(13, t) + "</div></div>";
+  }
+  h += "<p><button data-close='1' type='button'>Close</button></p>";
+  modal(h);
+}
+function policy() {
+  if (human < 0) { toast("Take control of a faction first", "bad"); return; }
+  const packed = ri(facAt(human), 14);
+  let h = "<h3>Policy</h3><p class='small'>Switches are free before turn 20. The engine applies the modifiers.</p>";
+  const axes = ["Economy", "Focus", "Society", "Environment"];
+  for (let a = 0; a < 4; a++) {
+    const cur = (packed >> (8 * a)) & 255;
+    h += "<h4>" + axes[a] + "</h4><div class='row'>";
+    for (let v = 0; v < 4; v++) {
+      h += "<button type='button' data-pol='" + a + ":" + v + "'" + (v === cur ? " disabled" : "") + ">" + text(10, a, v) + "</button>";
+    }
+    h += "</div>";
+  }
+  h += "<p><button data-close='1' type='button'>Close</button></p>";
+  modal(h);
+}
+function help() {
+  modal("<h2>How to play</h2><p>Watch runs four AI factions on seed 7919. Play gives you the Lumen Collective on that same kind of world.</p>"
+    + "<p><kbd>Arrows</kbd> move the selected unit · <kbd>B</kbd> found a city · <kbd>Enter</kbd> end turn · <kbd>F</kbd> fortify · <kbd>G</kbd> go to a tile you then click</p>"
+    + "<p>Unexplored land is black. Explored land outside your vision is dim. Reveal shows the whole map; the engine still tracks fog.</p>"
+    + "<p class='small'>Ships can be built once Hydrodynamic Hulls and Coastal Docks exist. Warren supply, tunnel flooding and diplomatic bargaining are not in this build — factions stay at war, which is how Colony4X opens. Build " + BUILD_ID + ".</p>"
+    + "<p><button data-close='1' type='button'>Close</button></p>");
+}
+function summary() {
+  const factions = [];
+  for (let f = 0; f < facN(); f++) factions.push({
+    name: text(1, ri(facAt(f), 0)), cities: ri(facAt(f), 8), pop: ri(facAt(f), 9),
+    credits: ri(facAt(f), 3), techs: ri(facAt(f), 6).toString(2).split("1").length - 1, score: ri(facAt(f), 11)
+  });
+  const events = [];
+  for (let i = 0; i < Math.min(i32(17), 20); i++) events.push(text(7, i));
+  return { format: "colony4x-ada-log", build: BUILD_ID, turn: i32(2), seed: u32(11), winner: i32(9), factions, events };
+}
+function downloadLog() {
+  const blob = new Blob([JSON.stringify(summary(), null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "col-feedback.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("Saved col-feedback.json");
+}
+function postLog() {
+  if (!live) return;
+  fetch("/api/log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(summary()) })
+    .then(r => r.json()).then(j => { $("liveInd").textContent = j && j.ok ? "live log: on" : "live log: unavailable"; })
+    .catch(() => { $("liveInd").textContent = "live log: unavailable"; live = false; });
+}
+document.addEventListener("keydown", ev => {
+  if (ev.target && (ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA")) return;
+  const key = ev.key;
+  if (key === "?" ) { help(); return; }
+  if (key === "Enter") { ev.preventDefault(); if (human >= 0) act(ACT.end, human, 0); return; }
+  if (key === "b" || key === "B") { if (selUnit >= 0) act(ACT.found, ri(unitAtWord(selUnit), 0), 0); return; }
+  if (key === "f" || key === "F") { if (selUnit >= 0) act(ACT.fort, ri(unitAtWord(selUnit), 0), 0); return; }
+  if (key === "p" || key === "P") { setSpeed(speed ? 0 : 2); return; }
+  const dir = { ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0] }[key];
+  if (dir && selUnit >= 0 && selUnit < unitN()) {
+    ev.preventDefault();
+    const at = ri(unitAtWord(selUnit), 3);
+    const x = (at % W()) + dir[0], y = ((at / W()) | 0) + dir[1];
+    if (x >= 0 && y >= 0 && x < W() && y < H()) act(ACT.move, ri(unitAtWord(selUnit), 0), y * W() + x);
+  }
+});
+$("watchBtn").onclick = () => start(true);
+$("playBtn").onclick = () => start(false);
+$("sp0").onclick = () => setSpeed(0);
+$("sp1").onclick = () => setSpeed(1);
+$("sp2").onclick = () => setSpeed(2);
+$("sp3").onclick = () => setSpeed(3);
+$("followCb").onchange = e => { follow = e.target.checked; };
+$("revealCb").onchange = e => {
+  reveal = e.target.checked;
+  api.c4x_set_viewer(reveal ? -1 : human);
+  show();
+};
+$("takeBtn").onclick = () => {
+  if (human >= 0) { act(ACT.hand, 0, 0); setSpeed(2); return; }
+  let h = "<h3>Take control</h3>";
+  for (let f = 0; f < facN(); f++) if (ri(facAt(f), 1)) {
+    h += "<p><button type='button' data-ctrl='" + f + "'>" + text(1, ri(facAt(f), 0)) + "</button></p>";
+  }
+  h += "<p><button data-close='1' type='button'>Cancel</button></p>";
+  modal(h);
+};
+$("researchBtn").onclick = research;
+$("policyBtn").onclick = policy;
+$("foundBtn").onclick = () => { if (selUnit >= 0) act(ACT.found, ri(unitAtWord(selUnit), 0), 0); };
+$("endBtn").onclick = () => { if (human >= 0) act(ACT.end, human, 0); };
+$("helpBtn").onclick = help;
+$("logBtn").onclick = downloadLog;
+
+function boot(err) {
+  if (err) { fail(err); $("engineLine").textContent = "Engine error"; return; }
+  try {
+    if (api.c4x_ready() !== 1 || text(0) !== "ada-wasm") throw new Error("The module did not identify itself as the Ada rules engine.");
+  } catch (e) { fail(e && e.message ? e.message : e); return; }
+  $("engineLine").textContent = "Ada engine ready · build " + BUILD_ID;
+  $("watchBtn").disabled = false;
+  $("playBtn").disabled = false;
+  window.__c4x = {
+    engine: () => text(0),
+    turn: () => i32(2),
+    cities: () => { let n = 0; for (let f = 0; f < facN(); f++) n += ri(facAt(f), 8); return n; },
+    human: () => i32(8),
+    error: () => text(8)
+  };
+}
+const wantLive = /[?&]live=1(?:&|$)/.test(location.search) && location.protocol.indexOf("http") === 0;
+if (wantLive) {
+  $("liveInd").textContent = "live log: …";
+  fetch("/api/ping").then(r => r.json()).then(j => {
+    if (j && j.live) { live = true; $("liveInd").textContent = "live log: on"; }
+    else $("liveInd").textContent = "live log: unavailable";
+  }).catch(() => { $("liveInd").textContent = "live log: unavailable"; });
+}
+try {
+  if (!WASM_B64 || WASM_B64.indexOf("__WASM") === 0) throw new Error("This page has no embedded WebAssembly. Run ./build.sh.");
+  const raw = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
+  WebAssembly.instantiate(raw, {}).then(obj => { api = obj.instance.exports; boot(); }).catch(e => boot(e && e.message ? e.message : e));
+} catch (e) { boot(e && e.message ? e.message : e); }
+</script>
+</body>
+</html>
