@@ -231,4 +231,148 @@ const line = [
   "ally=" + out.ally, "ob=" + out.ob, "tlo=" + out.tlo, "thi=" + out.thi
 ].join(" ");
 console.log(line);
-if (out.code !== 0) process.exit(1);
+
+const rest = { code: 0 };
+const planName = { expand: 0, econ: 1, military: 2, project: 3, strike: 4 };
+{
+  const S = game();
+  const plans = [];
+  for (const f of S.factions) {
+    G.planFaction(S, f.id);
+    plans.push(planName[f.plan]);
+  }
+  rest.plans = plans.join(",");
+}
+{
+  const S = game();
+  let a = -1, b = -1, best = 0;
+  for (let i = 0; i < S.tiles.length; i++) {
+    if (!S.tiles[i].land) continue;
+    for (let j = 0; j < S.tiles.length; j++) {
+      if (!S.tiles[j].land) continue;
+      const d = G.dist(S, i, j);
+      if (d > best && d < 20) { best = d; a = i; b = j; }
+    }
+  }
+  for (const u of S.units) if (u.f === 0) u.at = a;
+  const foe = G.makeUnit(S, 1, "trooper", G.nbrs(S, a).find(n => S.tiles[n].land));
+  G.updateSeen(S, 0);
+  for (const u of S.units) if (u.f === 0) u.at = b;
+  foe.at = a;
+  G.updateSeen(S, 0);
+  rest.ghost = Math.round(G.knownMil(S, 0, 1) * 100);
+}
+{
+  const S = game();
+  G.makeUnit(S, 1, "striker", S.factions[1].start);
+  G.dip(S);
+  S.dip.contact[0][1] = S.dip.contact[1][0] = 1;
+  S.factions[0].ai = S.factions[1].ai = true;
+  S.factions[1].warTarget = 0;
+  G.propose(S, 0, 1, { kind: "ceasefire" });
+  rest.wt = S.dip.rel[0][1] === "war" ? 0 : 1;
+  S.factions[1].warTarget = null;
+  G.propose(S, 0, 1, { kind: "ceasefire" });
+  rest.wt2 = { war: 0, ceasefire: 1, peace: 2, alliance: 3 }[S.dip.rel[0][1]];
+}
+{
+  const S = game();
+  let job = -1;
+  outer: for (let i = 0; i < S.tiles.length; i++) {
+    if (!S.tiles[i].land || G.X(S, i) < 3 || G.Y(S, i) < 3) continue;
+    for (const n of G.nbrs(S, i)) {
+      if (!S.tiles[n].land) continue;
+      for (const c of G.nbrs(S, n)) {
+        if (c !== i && S.tiles[c].land && G.dist(S, i, c) === 2 && !G.cityAt(S, c)) { job = [i, n, c]; break outer; }
+      }
+    }
+  }
+  const [anchor, mid, city] = job;
+  S.tiles[anchor].tun = 0;
+  const bur = G.makeUnit(S, 0, "burrower", anchor);
+  const founder = G.makeUnit(S, 1, "colonist", city);
+  const founded = G.act(S, { type: "found", u: founder.id, f: 1 });
+  if (!founded.ok) rest.code = 3;
+  else {
+    G.updateSeen(S, 0);
+    S.factions[0].warTarget = 1;
+    const ok = G.aiRush(S, bur);
+    rest.rush = ok ? 1 : 0;
+    rest.rjob = bur.tgt;
+    rest.rleft = bur.work ? bur.work.left : -1;
+    if (mid !== bur.tgt && rest.rush) rest.mid = mid;
+  }
+}
+{
+  const S = game();
+  const site = coastal(S);
+  const sea = G.nbrs(S, site).find(n => !S.tiles[n].land);
+  const ship = G.makeUnit(S, 0, "transport", sea);
+  const man = G.makeUnit(S, 0, "colonist", site);
+  const boarded = G.act(S, { type: "move", u: man.id, f: 0, to: sea });
+  rest.aboard = boarded.ok && man.on === ship.id ? 1 : 0;
+  const next = G.nbrs(S, sea).find(n => !S.tiles[n].land && G.nbrs(S, n).some(k => S.tiles[k].land));
+  if (next == null) rest.code = 4;
+  else {
+    const sailed = G.act(S, { type: "move", u: ship.id, f: 0, to: next });
+    rest.carried = sailed.ok && man.at === ship.at ? 1 : 0;
+    const shore = G.nbrs(S, ship.at).find(n => S.tiles[n].land);
+    man.mp = G.UNITS.colonist.mv * 3;
+    const landed = shore == null ? { ok: false } : G.act(S, { type: "move", u: man.id, f: 0, to: shore });
+    rest.landed = landed.ok && man.on == null && man.mp === 0 && S.tiles[man.at].land ? 1 : 0;
+  }
+}
+{
+  const S = game();
+  const site = coastal(S);
+  const ship = G.makeUnit(S, 0, "transport", site);
+  const man = G.makeUnit(S, 0, "colonist", site);
+  man.wantShip = true;
+  G.loadWaiters(S, ship);
+  rest.loaded = man.on === ship.id ? 1 : 0;
+}
+{
+  const S = game();
+  S.opts.rules = Object.assign({}, S.opts.rules, { diplomatic: true, cooperative: false, events: false });
+  S.turn = 120;
+  G.dip(S);
+  const founder = S.units.find(u => u.f === 0 && u.type === "colonist");
+  const founded = G.act(S, { type: "found", u: founder.id, f: 0 });
+  if (!founded.ok) rest.code = 5;
+  else {
+    G.setRel(S, 0, 1, "peace", "test");
+    G.setRel(S, 0, 2, "peace", "test");
+    S.dip.since[0][1] = S.dip.since[1][0] = 100;
+    S.dip.since[0][2] = S.dip.since[2][0] = 100;
+    S.dip.rep[0] = 60;
+    for (let i = 0; i < 15; i++) G.diploVictory(S);
+    rest.dwin = S.winner == null ? -1 : S.winner;
+    rest.dtype = S.winType === "diplomatic" ? 7 : 0;
+  }
+}
+{
+  const S = game();
+  S.opts.rules = Object.assign({}, S.opts.rules, { diplomatic: false, cooperative: true, events: false });
+  S.turn = 120;
+  G.dip(S);
+  S.factions[2].alive = S.factions[3].alive = false;
+  const founder = S.units.find(u => u.f === 0 && u.type === "colonist");
+  G.act(S, { type: "found", u: founder.id, f: 0 });
+  G.setRel(S, 0, 1, "alliance", "test");
+  S.dip.since[0][1] = S.dip.since[1][0] = S.turn - 10;
+  S.factions[0].landShare = 0.4;
+  S.factions[1].landShare = 0.3;
+  for (let i = 0; i < 15; i++) G.diploVictory(S);
+  rest.cwin = S.winner == null ? -1 : S.winner;
+  rest.ctype = S.winType === "cooperative" ? 8 : 0;
+}
+const rstatus = rest.code === 0 ? "status=pass" : "status=fail";
+console.log([
+  "REST", rstatus, "code=" + rest.code,
+  "plans=" + rest.plans, "ghost=" + rest.ghost,
+  "wt=" + rest.wt, "wt2=" + rest.wt2,
+  "rush=" + rest.rush, "rjob=" + rest.rjob, "rleft=" + rest.rleft,
+  "aboard=" + rest.aboard, "carried=" + rest.carried, "landed=" + rest.landed, "loaded=" + rest.loaded,
+  "dwin=" + rest.dwin, "dtype=" + rest.dtype, "cwin=" + rest.cwin, "ctype=" + rest.ctype
+].join(" "));
+if (out.code !== 0 || rest.code !== 0) process.exit(1);

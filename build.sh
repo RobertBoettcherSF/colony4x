@@ -72,7 +72,7 @@ if ! cmp -s obj/native-report.txt obj/wasm-report.txt; then
 fi
 echo "Native and WebAssembly reports match"
 node tools/js_mechanics.mjs > obj/js-mechanics.txt
-awk '/^MECH /' obj/native-report.txt > obj/native-mechanics.txt
+awk '/^(MECH|REST) /' obj/native-report.txt > obj/native-mechanics.txt
 if ! cmp -s obj/js-mechanics.txt obj/native-mechanics.txt; then
   echo "JavaScript reference and Ada mechanics differ"
   diff -u obj/js-mechanics.txt obj/native-mechanics.txt || true

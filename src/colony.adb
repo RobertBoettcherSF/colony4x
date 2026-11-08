@@ -59,9 +59,10 @@ package body Colony is
    end record;
 
    type Unit_Rec is record
-      Id, Fac, Loc, HP, MP, Home, Goto_At, Target, Work_Left, On_Ship, Tn : Integer := -1;
+      Id, Fac, Loc, HP, MP, Home, Goto_At, Target, Work_Left, On_Ship, Tn,
+      Wait_T, Dest, Dest_T, Lt, Orig : Integer := -1;
       Kind  : Unit_Kind := Trooper;
-      Fort, Skip, No_Heal : Boolean := False;
+      Fort, Skip, No_Heal, Want_Ship, Rush : Boolean := False;
       Work  : Work_Kind := W_None;
    end record;
 
@@ -105,6 +106,22 @@ package body Colony is
    Rep_V : array (0 .. 3) of Integer := (others => 50);
    Lock_Until : array (0 .. 3) of Integer := (others => 0);
    Fung_Cut : array (0 .. 3) of Integer := (others => 0);
+   War_Target : array (0 .. 3) of Integer := (others => -1);
+   War_City : array (0 .. 3) of Integer := (others => -1);
+   Land_Share : array (0 .. 3) of Long_Float := (others => 0.0);
+   Dip_Turns : array (0 .. 3) of Integer := (others => 0);
+   Coop_Turns : Integer := 0;
+   Coop_Key : Integer := 0;
+   type Ghost_Rec is record
+      Live : Boolean := False;
+      Id, Loc, Fac, Kind, Seen : Integer := -1;
+   end record;
+   Ghosts : array (0 .. 3, 0 .. 63) of Ghost_Rec := (others => (others => <>));
+   type CMem_Rec is record
+      Live : Boolean := False;
+      Id, Loc, Fac : Integer := -1;
+   end record;
+   CMem : array (0 .. 3, 0 .. 31) of CMem_Rec := (others => (others => <>));
    type Contract_Rec is record
       Live, Energy : Boolean := False;
       Seller, Buyer, Amt, Left, Price : Integer := 0;
@@ -153,6 +170,11 @@ package body Colony is
    function Collapse_Tunnel (Fid, Tile : Integer) return String;
    function U_Bomb (K : Unit_Kind) return Boolean;
    function Bombard (Uidx, Tile : Integer) return Boolean;
+   function Known_Owner (Fid, Cidx : Integer) return Integer;
+   function Mil_Power (Fid : Integer) return Long_Float;
+   function Strength_Of (A, B : Integer) return Long_Float;
+   procedure Plan_Faction (Fid : Integer);
+   procedure Score_Diplomacy;
    function At_War (A, B : Integer) return Boolean;
    function Pass_OK (Fid, Owner : Integer) return Boolean;
 
@@ -1535,7 +1557,85 @@ package body Colony is
       end loop;
       for C in 0 .. City_N - 1 loop
          if Cities (C).Fac = Fid then
-            Mark (Fid, Cities (C).Loc, (if Has_Tech (Fid, Tech_Kind'Pos (Sensors)) then 4 else 3));
+            Mark (Fid, Cities (C).Loc,
+                  (if Cities (C).UG then 2 else 3)
+                  + (if Has_Tech (Fid, Tech_Kind'Pos (Sensors)) then 1 else 0));
+         end if;
+      end loop;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac /= Fid and then Factions (Fid).Vis (Cities (C).Loc) then
+            declare
+               Slot : Integer := -1;
+            begin
+               for I in CMem'Range (2) loop
+                  if CMem (Fid, I).Live and then CMem (Fid, I).Id = Cities (C).Id then
+                     Slot := I;
+                     exit;
+                  elsif not CMem (Fid, I).Live and then Slot < 0 then
+                     Slot := I;
+                  end if;
+               end loop;
+               if Slot >= 0 then
+                  CMem (Fid, Slot) := (Live => True, Id => Cities (C).Id,
+                                       Loc => Cities (C).Loc, Fac => Cities (C).Fac);
+               end if;
+            end;
+         end if;
+      end loop;
+      for I in CMem'Range (2) loop
+         if CMem (Fid, I).Live and then Factions (Fid).Vis (CMem (Fid, I).Loc) then
+            declare
+               Still : Boolean := False;
+            begin
+               for C in 0 .. City_N - 1 loop
+                  if Cities (C).Id = CMem (Fid, I).Id then
+                     Still := True;
+                  end if;
+               end loop;
+               if not Still then
+                  CMem (Fid, I).Live := False;
+               end if;
+            end;
+         end if;
+      end loop;
+      for U in 0 .. Unit_N - 1 loop
+         if Units (U).Fac /= Fid and then Factions (Fid).Vis (Units (U).Loc) then
+            declare
+               Slot : Integer := -1;
+            begin
+               for I in Ghosts'Range (2) loop
+                  if Ghosts (Fid, I).Live and then Ghosts (Fid, I).Id = Units (U).Id then
+                     Slot := I;
+                     exit;
+                  elsif not Ghosts (Fid, I).Live and then Slot < 0 then
+                     Slot := I;
+                  end if;
+               end loop;
+               if Slot >= 0 then
+                  Ghosts (Fid, Slot) := (Live => True, Id => Units (U).Id, Loc => Units (U).Loc,
+                                         Fac => Units (U).Fac, Kind => Unit_Kind'Pos (Units (U).Kind),
+                                         Seen => Turn_N);
+               end if;
+            end;
+         end if;
+      end loop;
+      for I in Ghosts'Range (2) loop
+         if Ghosts (Fid, I).Live then
+            declare
+               G : Ghost_Rec renames Ghosts (Fid, I);
+               U : Integer := -1;
+            begin
+               for V in 0 .. Unit_N - 1 loop
+                  if Units (V).Id = G.Id then
+                     U := V;
+                  end if;
+               end loop;
+               if G.Seen = Turn_N and then U >= 0 and then Factions (Fid).Vis (Units (U).Loc) then
+                  null;
+               elsif Factions (Fid).Vis (G.Loc) or else Turn_N - G.Seen > 50 then
+                  G.Live := False;
+               end if;
+            end;
          end if;
       end loop;
    end Update_Seen;
@@ -1832,6 +1932,7 @@ package body Colony is
       Cost : Integer;
       C, D : Integer;
       From : Integer;
+      Was_Aboard, From_Sea : Boolean := False;
    begin
       if U < 0 or else U >= Unit_N then
          Set_Error ("No such unit");
@@ -1845,12 +1946,11 @@ package body Colony is
          Set_Error ("Not adjacent");
          return False;
       end if;
-      if Units (U).On_Ship >= 0 then
-         if not Tiles (To).Land and then City_At (To) < 0 then
-            Set_Error ("Aboard a transport. Move onto a shore tile to land");
-            return False;
-         end if;
-         Units (U).On_Ship := -1;
+      Was_Aboard := Units (U).On_Ship >= 0;
+      From_Sea := not Tiles (Units (U).Loc).Land and then City_At (Units (U).Loc) < 0;
+      if Was_Aboard and then not Tiles (To).Land and then City_At (To) < 0 then
+         Set_Error ("Aboard a transport. Move onto a shore tile to land");
+         return False;
       end if;
       if U_Ship (Units (U).Kind) then
          C := City_At (To);
@@ -2005,6 +2105,9 @@ package body Colony is
          if Best_Def (To, U) < 0 then
             Units (U).Loc := To;
          end if;
+         if Was_Aboard then
+            Units (U).On_Ship := -1;
+         end if;
          Units (U).MP := 0;
          if Units (U).Fac >= 0 then
             Mark (Units (U).Fac, Units (U).Loc, Vis_R (Units (U)));
@@ -2034,6 +2137,12 @@ package body Colony is
       end if;
       Units (U).MP := Integer'Max (0, Units (U).MP - Cost);
       Units (U).Loc := To;
+      if Was_Aboard then
+         Units (U).On_Ship := -1;
+         if From_Sea then
+            Units (U).MP := 0;
+         end if;
+      end if;
       if Units (U).Fac >= 0 and then Tiles (To).Tun >= 0 and then Tiles (To).Tun /= Units (U).Fac
         and then At_War (Units (U).Fac, Tiles (To).Tun) and then City_At (To) < 0
       then
@@ -2053,7 +2162,7 @@ package body Colony is
       return True;
    end Step;
 
-   procedure BFS (Start, Fid, Max_D : Integer; Ignore_Enemy : Boolean := False) is
+   procedure BFS (Start, Fid, Max_D : Integer; Ignore_Enemy : Boolean := False; Mode : Integer := 0) is
       Q : array (0 .. Max_Tiles - 1) of Integer;
       Qh, Qt : Integer := 0;
       C, Nx, Ny, N : Integer;
@@ -2072,6 +2181,12 @@ package body Colony is
          Occ_A (Cities (CI).Loc) := Occ_A (Cities (CI).Loc) or 2;
          if Cities (CI).Fac /= Fid then
             Occ_A (Cities (CI).Loc) := Occ_A (Cities (CI).Loc) or 1;
+         end if;
+         if Fid >= 0 and then Coastal (CI)
+           and then (Cities (CI).Fac = Fid
+                     or else (Cities (CI).Fac >= 0 and then Rel (Fid, Cities (CI).Fac) = Rel_Ally))
+         then
+            Occ_A (Cities (CI).Loc) := Occ_A (Cities (CI).Loc) or 8;
          end if;
       end loop;
       if Start < 0 or else Start >= NTiles then
@@ -2094,7 +2209,10 @@ package body Colony is
                      if In_Map (Nx, Ny) then
                         N := Ny * W + Nx;
                         if Dist_A (N) < 0
-                          and then (Tiles (N).Land or else (Occ_A (N) and 2) /= 0)
+                          and then (if Mode = 1
+                                    then (not Tiles (N).Land and then (Occ_A (N) and 2) = 0)
+                                      or else (Occ_A (N) and 8) /= 0
+                                    else Tiles (N).Land or else (Occ_A (N) and 2) /= 0)
                         then
                            Dist_A (N) := Dist_A (C) + 1;
                            Prev_A (N) := C;
@@ -2123,9 +2241,10 @@ package body Colony is
          return;
       end if;
       if U_Ship (Units (Uidx).Kind) then
-         return;
+         BFS (Units (Uidx).Loc, Units (Uidx).Fac, Max_D, False, 1);
+      else
+         BFS (Units (Uidx).Loc, Units (Uidx).Fac, Max_D);
       end if;
-      BFS (Units (Uidx).Loc, Units (Uidx).Fac, Max_D);
       if Dist_A (To) < 0 then
          return;
       end if;
@@ -2326,6 +2445,13 @@ package body Colony is
                Cities (C).Q_Len := 1;
                return;
             end if;
+            if Key = 0 and then (Plan = 4 or else Plan = 2) and then War_Target (Fid) >= 0
+              and then Burs < 2 and then Cities (C).Pop >= 3 and then Rand < 0.4
+            then
+               Cities (C).Queue (0) := Unit_Kind'Pos (Burrower);
+               Cities (C).Q_Len := 1;
+               return;
+            end if;
          end;
       end if;
       if Count_Cities (Fid) < Target and then Cities (C).Pop >= 2
@@ -2372,6 +2498,263 @@ package body Colony is
       Cities (C).Q_Len := 1;
    end AI_City;
 
+   function AI_Rush (U : Integer) return Boolean is
+      Fid : constant Integer := Units (U).Fac;
+      E, ED, T, TD, Job : Integer;
+      C : Integer;
+      Path : array (0 .. 48) of Integer;
+      PN : Natural;
+   begin
+      E := -1;
+      ED := 99;
+      if War_City (Fid) >= 0 then
+         for I in 0 .. City_N - 1 loop
+            if Cities (I).Loc = War_City (Fid) and then Known_Owner (Fid, I) = War_Target (Fid) then
+               E := I;
+               ED := Dist (Cities (I).Loc, Units (U).Loc);
+            end if;
+         end loop;
+      end if;
+      if E < 0 then
+      for I in 0 .. City_N - 1 loop
+         if Cities (I).Fac /= Fid and then Known_Owner (Fid, I) = War_Target (Fid) then
+            if Dist (Cities (I).Loc, Units (U).Loc) < ED then
+               ED := Dist (Cities (I).Loc, Units (U).Loc);
+               E := I;
+            end if;
+         end if;
+      end loop;
+      end if;
+      if E < 0 or else ED > 16 then
+         return False;
+      end if;
+      T := -1;
+      TD := 99;
+      for I in 0 .. NTiles - 1 loop
+         if Tiles (I).Tun /= Fid then
+            null;
+         else
+            declare
+               Own_City : Boolean := False;
+            begin
+               for K in 0 .. City_N - 1 loop
+                  if Cities (K).Loc = I and then Cities (K).Fac = Fid then
+                     Own_City := True;
+                  end if;
+               end loop;
+               if not Own_City and then Dist (I, Cities (E).Loc) < TD then
+                  TD := Dist (I, Cities (E).Loc);
+                  T := I;
+               end if;
+            end;
+         end if;
+      end loop;
+      if T < 0 or else TD <= 1 or else TD > 14 then
+         return False;
+      end if;
+      BFS (T, Fid, 16, True);
+      if Dist_A (Cities (E).Loc) < 0 then
+         return False;
+      end if;
+      PN := 0;
+      C := Prev_A (Cities (E).Loc);
+      while C >= 0 and then C /= T and then PN < Path'Length loop
+         Path (PN) := C;
+         PN := PN + 1;
+         C := Prev_A (C);
+      end loop;
+      Job := -1;
+      for K in reverse 0 .. PN - 1 loop
+         if Tiles (Path (K)).Tun /= Fid and then Tiles (Path (K)).Land
+           and then City_At (Path (K)) < 0 and then (Occ_A (Path (K)) and 1) = 0
+         then
+            Job := Path (K);
+            exit;
+         end if;
+      end loop;
+      if Job < 0 then
+         return False;
+      end if;
+      Units (U).Target := Job;
+      if Units (U).Loc /= Job then
+         Move_Toward (U, Job, 20);
+      end if;
+      declare
+         Id : constant Integer := Units (U).Id;
+         V : constant Integer := Find_Unit (Id);
+      begin
+         if V >= 0 and then Units (V).Loc = Job and then Units (V).MP > 0
+           and then Tiles (Job).Tun /= Fid
+         then
+            Units (V).Work := W_Tunnel;
+            Units (V).Work_Left := (if Tiles (Job).Rock = 2 then 3 else 2);
+            Units (V).Rush := True;
+            Units (V).MP := 0;
+         end if;
+      end;
+      return True;
+   end AI_Rush;
+
+   procedure Load_Waiters (U : Integer);
+   procedure Sail_Cargo (U : Integer) is
+      Fid : Integer;
+      Cargo : Integer := 0;
+      Lm : array (0 .. Max_Tiles - 1) of Integer := (others => -1);
+      Next_Lm : Integer := 0;
+      Dest, Spot, Best, BV : Integer;
+      Nb : Nbr_Arr;
+      NN : Natural;
+   begin
+      Load_Waiters (U);
+      if U < 0 then
+         return;
+      end if;
+      Fid := Units (U).Fac;
+      for O in 0 .. Unit_N - 1 loop
+         if Units (O).On_Ship = Units (U).Id then
+            Cargo := Cargo + 1;
+         end if;
+      end loop;
+      if Cargo = 0 then
+         return;
+      end if;
+      for I in 0 .. NTiles - 1 loop
+         if Tiles (I).Land and then Lm (I) < 0 then
+            declare
+               Q : array (0 .. Max_Tiles - 1) of Integer;
+               Qh, Qt : Integer;
+            begin
+               Q (0) := I;
+               Qt := 1;
+               Qh := 0;
+               Lm (I) := Next_Lm;
+               while Qh < Qt loop
+                  Nbrs (Q (Qh), 1, NN, Nb);
+                  Qh := Qh + 1;
+                  for K in 0 .. NN - 1 loop
+                     if Tiles (Nb (K)).Land and then Lm (Nb (K)) < 0 then
+                        Lm (Nb (K)) := Next_Lm;
+                        Q (Qt) := Nb (K);
+                        Qt := Qt + 1;
+                     end if;
+                  end loop;
+               end loop;
+               Next_Lm := Next_Lm + 1;
+            end;
+         end if;
+      end loop;
+      Dest := -1;
+      BV := -100000;
+      declare
+         Home_Lm : Integer := -2;
+      begin
+      if Units (U).Orig in 0 .. NTiles - 1 then
+         Home_Lm := Lm (Units (U).Orig);
+      end if;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac /= Fid and then At_War (Fid, Cities (C).Fac)
+           and then Known_Owner (Fid, C) = Cities (C).Fac
+           and then Lm (Cities (C).Loc) /= Home_Lm
+         then
+            declare
+               Score : Integer := -Dist (Cities (C).Loc, Units (U).Loc) - Cities (C).Pop;
+            begin
+               if Cities (C).Fac = War_Target (Fid) then
+                  Score := Score + 12;
+               end if;
+               if Score > BV then
+                  BV := Score;
+                  Dest := Cities (C).Loc;
+               end if;
+            end;
+         end if;
+      end loop;
+      end;
+      if Dest < 0 then
+         return;
+      end if;
+      BFS (Units (U).Loc, Fid, 40, False, 1);
+      Spot := -1;
+      Best := 100000;
+      for I in 0 .. NTiles - 1 loop
+         if Dist_A (I) >= 0 and then not Tiles (I).Land and then City_At (I) < 0
+           and then Dist (I, Dest) <= 6
+         then
+            Nbrs (I, 1, NN, Nb);
+            for K in 0 .. NN - 1 loop
+               if Tiles (Nb (K)).Land and then Lm (Nb (K)) = Lm (Dest) and then City_At (Nb (K)) < 0 then
+                  if Dist_A (I) + Dist (Nb (K), Dest) * 2 < Best then
+                     Best := Dist_A (I) + Dist (Nb (K), Dest) * 2;
+                     Spot := I;
+                  end if;
+               end if;
+            end loop;
+         end if;
+      end loop;
+      if Spot >= 0 and then Spot /= Units (U).Loc then
+         Move_Toward (U, Spot, 40);
+      end if;
+      declare
+         Id : constant Integer := Units (U).Id;
+         V : Integer := Find_Unit (Id);
+         Shore : Integer;
+      begin
+         if V < 0 or else Tiles (Units (V).Loc).Land then
+            return;
+         end if;
+         Nbrs (Units (V).Loc, 1, NN, Nb);
+         Shore := -1;
+         for K in 0 .. NN - 1 loop
+            if Tiles (Nb (K)).Land and then Lm (Nb (K)) = Lm (Dest)
+              and then Dist (Nb (K), Dest) <= 6 and then City_At (Nb (K)) < 0
+            then
+               Shore := Nb (K);
+               exit;
+            end if;
+         end loop;
+         if Shore < 0 then
+            return;
+         end if;
+         for O in 0 .. Unit_N - 1 loop
+            if Units (O).On_Ship = Id then
+               Units (O).MP := U_Mv (Units (O).Kind) * 3;
+               if not Step (O, Shore) then
+                  null;
+               end if;
+               V := Find_Unit (Id);
+               exit when V < 0;
+            end if;
+         end loop;
+      end;
+   end Sail_Cargo;
+
+   procedure Load_Waiters (U : Integer) is
+      Room : Integer := 3;
+   begin
+      if U < 0 or else Units (U).Kind /= Transport then
+         return;
+      end if;
+      for O in 0 .. Unit_N - 1 loop
+         if Units (O).On_Ship = Units (U).Id then
+            Room := Room - 1;
+         end if;
+      end loop;
+      for O in 0 .. Unit_N - 1 loop
+         exit when Room <= 0;
+         if O /= U and then Units (O).Fac = Units (U).Fac and then Units (O).Loc = Units (U).Loc
+           and then Units (O).Want_Ship and then Units (O).On_Ship < 0 and then not U_Ship (Units (O).Kind)
+         then
+            Units (O).On_Ship := Units (U).Id;
+            Units (O).MP := 0;
+            Units (O).Want_Ship := False;
+            Units (O).Skip := False;
+            Units (U).Orig := Units (U).Loc;
+            Room := Room - 1;
+            Log ("T" & Img (Turn_N) & " " & U_Name (Units (O).Kind) & " boards a transport");
+         end if;
+      end loop;
+   end Load_Waiters;
+
    procedure AI_Burrower (U : Integer) is
       Fid : constant Integer := Units (U).Fac;
       Wars : Integer := 0;
@@ -2386,6 +2769,11 @@ package body Colony is
             Wars := Wars + 1;
          end if;
       end loop;
+      if Slot_Key (Fid) = 0 and then (Factions (Fid).Plan = 4 or else Factions (Fid).Plan = 2)
+        and then War_Target (Fid) >= 0 and then Wars >= 1 and then AI_Rush (U)
+      then
+         return;
+      end if;
       if Wars < 2 then
          BFS (Units (U).Loc, Fid, 10);
          BS := -1.0e9;
@@ -2524,6 +2912,10 @@ package body Colony is
          return;
       end if;
       if Units (U).Fac < 0 then
+         return;
+      end if;
+      if Units (U).Kind = Transport then
+         Sail_Cargo (U);
          return;
       end if;
       if U_Bomb (Units (U).Kind) and then Units (U).HP >= 5
@@ -2735,13 +3127,7 @@ package body Colony is
          Log ("T" & Img (Turn_N) & " " & Colony_Names.Faction_Name (Slot_Key (Fid))
               & " sets its policies");
       end if;
-      if Turn_N < 25 and then Count_Cities (Fid) < 4 then
-         Factions (Fid).Plan := 0;
-      elsif Count_Units (Fid, Trooper) + Count_Units (Fid, Lancer) < Count_Cities (Fid) then
-         Factions (Fid).Plan := 2;
-      else
-         Factions (Fid).Plan := 1;
-      end if;
+      Plan_Faction (Fid);
       if Slot_Key (Fid) = 1 then
          Factions (Fid).Labs := 0.7;
       elsif Slot_Key (Fid) = 0 then
@@ -3225,6 +3611,9 @@ package body Colony is
                end if;
             end loop;
             Share := Long_Float (Owned) / Long_Float (Integer'Max (1, Land_N));
+            if F in 0 .. 3 then
+               Land_Share (F) := Share;
+            end if;
             if Share >= 0.5 then
                Dom_Turns (F) := Dom_Turns (F) + 1;
             else
@@ -3237,6 +3626,10 @@ package body Colony is
                return;
             end if;
          end loop;
+      end if;
+      Score_Diplomacy;
+      if Winner /= -2 then
+         return;
       end if;
       for F in 0 .. Fac_N - 1 loop
          if Factions (F).Alive then
@@ -3390,11 +3783,396 @@ package body Colony is
             P := Cred;
          end if;
       end if;
+      if Fid in 0 .. 3 then
+         P := Long_Float'Max (P, Long_Float (Dip_Turns (Fid)) / 15.0 * 0.6);
+         P := Long_Float'Max (P, Long_Float (Dom_Turns (Fid)) / 10.0 * 0.9);
+         P := Long_Float'Max (P, Land_Share (Fid) / 0.5 * 0.5);
+      end if;
+      P := Long_Float'Max (P, Long_Float (Coop_Turns) / 15.0 * 0.6);
       if P > 1.0 then
          P := 1.0;
       end if;
       return P;
    end Victory_Progress;
+
+   function Pact_Count (Fid : Integer) return Integer is
+      N : Integer := 0;
+   begin
+      for O in 0 .. Fac_N - 1 loop
+         if O /= Fid and then Factions (O).Alive
+           and then (Rel (Fid, O) = Rel_Peace or else Rel (Fid, O) = Rel_Ally)
+         then
+            N := N + 1;
+         end if;
+      end loop;
+      return N;
+   end Pact_Count;
+
+   function Top_Score (Fid : Integer) return Boolean is
+   begin
+      for O in 0 .. Fac_N - 1 loop
+         if O /= Fid and then Factions (O).Alive and then Score_Of (O) >= Score_Of (Fid) then
+            return False;
+         end if;
+      end loop;
+      return True;
+   end Top_Score;
+
+   procedure Score_Diplomacy is
+      Alive_N : Integer := 0;
+      Need, Best, Best_S, Key, Lead, Lead_S : Integer;
+      Ok : Boolean;
+      Group : array (0 .. 3) of Boolean := (others => False);
+      Any : Boolean;
+   begin
+      if Winner /= -2 then
+         return;
+      end if;
+      for F in 0 .. Fac_N - 1 loop
+         if Factions (F).Alive then
+            Alive_N := Alive_N + 1;
+         end if;
+      end loop;
+      if Rule (8) then
+         Need := Integer'Max (2, Alive_N / 2);
+         Best := -1;
+         Best_S := -1;
+         for F in 0 .. Fac_N - 1 loop
+            if Factions (F).Alive then
+               Ok := Top_Score (F) and then Alive_N >= 3 and then Turn_N >= 120
+                 and then Pact_Count (F) >= Need and then Rep_V (F) >= 60;
+               if Ok then
+                  Dip_Turns (F) := Dip_Turns (F) + 1;
+               else
+                  Dip_Turns (F) := 0;
+               end if;
+               if Dip_Turns (F) >= 15 and then Score_Of (F) > Best_S then
+                  Best := F;
+                  Best_S := Score_Of (F);
+               end if;
+            end if;
+         end loop;
+         if Best >= 0 then
+            Winner := Best;
+            Win_Type := 7;
+            Log ("T" & Img (Turn_N) & " diplomatic victory");
+            return;
+         end if;
+      end if;
+      if Rule (9) and then Turn_N >= 120 and then Alive_N >= 2 then
+         Any := True;
+         for A in 0 .. Fac_N - 1 loop
+            if Factions (A).Alive then
+               for B in A + 1 .. Fac_N - 1 loop
+                  if Factions (B).Alive and then Rel (A, B) /= Rel_Ally then
+                     Any := False;
+                  end if;
+               end loop;
+            end if;
+         end loop;
+         Key := 0;
+         if Any then
+            for F in 0 .. Fac_N - 1 loop
+               if Factions (F).Alive then
+                  Group (F) := True;
+                  Key := Key + 2 ** F;
+               end if;
+            end loop;
+            Key := Key + 32;
+         else
+            for A in 0 .. Fac_N - 1 loop
+               if Factions (A).Alive then
+                  for B in A + 1 .. Fac_N - 1 loop
+                     if Factions (B).Alive and then Rel (A, B) = Rel_Ally
+                       and then Turn_N - Since (A, B) >= 10
+                       and then Land_Share (A) + Land_Share (B) >= 0.6
+                     then
+                        Group (A) := True;
+                        Group (B) := True;
+                        Key := 2 ** A + 2 ** B;
+                     end if;
+                  end loop;
+               end if;
+            end loop;
+         end if;
+         if Key /= 0 and then Key = Coop_Key then
+            Coop_Turns := Coop_Turns + 1;
+         else
+            Coop_Turns := (if Key /= 0 then 1 else 0);
+            Coop_Key := Key;
+         end if;
+         if Key /= 0 and then Coop_Turns >= 15 then
+            Lead := -1;
+            Lead_S := -1;
+            for F in 0 .. 3 loop
+               if Group (F) and then Score_Of (F) > Lead_S then
+                  Lead := F;
+                  Lead_S := Score_Of (F);
+               end if;
+            end loop;
+            if Lead >= 0 then
+               Winner := Lead;
+               Win_Type := 8;
+               Log ("T" & Img (Turn_N) & " cooperative victory");
+            end if;
+         end if;
+      end if;
+   end Score_Diplomacy;
+
+   function Wants_Break (Fid, Opp : Integer) return Boolean is
+      Pers : constant Integer := Slot_Key (Fid);
+      Prox : constant Long_Float := Victory_Progress (Opp);
+      SR : constant Long_Float := Strength_Of (Fid, Opp);
+      Held : constant Integer := Turn_N - Since (Fid, Opp);
+   begin
+      if Rel (Fid, Opp) = Rel_War then
+         return True;
+      end if;
+      if Rel (Fid, Opp) = Rel_Ally then
+         return Prox > 0.9 and then Pers = 0;
+      end if;
+      if Prox > 0.65 then
+         return True;
+      end if;
+      if Pers = 0 then
+         return Held >= 10 and then SR > 1.4 and then Turn_N >= Grace;
+      end if;
+      return Pers = 3 and then Rel (Fid, Opp) = Rel_Cease and then SR > 2.0 and then Held >= 8;
+   end Wants_Break;
+
+   type Abs_Rec is record
+      Cities, Pop, Prod, Labs, Mil, Tech, Prog, Cr : Long_Float := 0.0;
+   end record;
+
+   procedure Abs_Apply (S, O : in out Abs_Rec; Plan : Integer) is
+      NT : constant Long_Float := 22.0;
+      Eff : Long_Float;
+      K : Long_Float;
+   begin
+      Eff := 1.0 / (1.0 + Long_Float'Max (0.0, S.Cities - 5.0) * 0.06);
+      S.Tech := Long_Float'Min (NT, S.Tech + S.Labs * 10.0 * Eff / (20.0 + 17.0 * S.Tech));
+      case Plan is
+         when 0 =>
+            S.Cities := S.Cities + (if S.Cities < 14.0 then 1.4 else 0.4);
+            S.Pop := S.Pop + 3.0;
+            S.Prod := S.Prod * 1.06;
+         when 1 =>
+            S.Prod := S.Prod * 1.12;
+            S.Labs := S.Labs * 1.2;
+            S.Pop := S.Pop + 2.0;
+         when 2 =>
+            S.Mil := S.Mil + S.Prod * 10.0 / 30.0 * 3.2;
+         when 3 =>
+            if S.Tech >= NT - 0.5 then
+               S.Prog := Long_Float'Min (1.0, S.Prog
+                 + (S.Prod * 10.0 + S.Cr * 0.5) / 1200.0 * 0.55
+                 * (if S.Cities >= 5.0 then 1.0 else 0.3));
+            else
+               S.Tech := Long_Float'Min (NT, S.Tech + S.Labs * 4.0 / (20.0 + 17.0 * S.Tech));
+            end if;
+            S.Cr := S.Cr * 0.5;
+         when others =>
+            if S.Mil > O.Mil * 1.15 then
+               K := Long_Float'Min (O.Cities, 1.0 + Long_Float'Floor (S.Mil / (O.Mil + 1.0) / 3.0));
+               O.Cities := O.Cities - K;
+               S.Cities := S.Cities + K * 0.6;
+               O.Prog := O.Prog * 0.5;
+               O.Prod := O.Prod * 0.8;
+               S.Mil := S.Mil * 0.7;
+               O.Mil := O.Mil * 0.55;
+            else
+               S.Mil := S.Mil * 0.6;
+               O.Mil := O.Mil * 0.85;
+            end if;
+      end case;
+      S.Prog := Long_Float'Max (S.Prog, Long_Float'Min (0.35, S.Tech / NT * 0.35));
+   end Abs_Apply;
+
+   function Abs_Eval (Me, Op : Abs_Rec) return Long_Float is
+      V : Long_Float;
+   begin
+      V := Me.Prog * 120.0 + Me.Cities * 3.0 + Me.Tech * 2.0 + Me.Mil * 0.35 + Me.Pop * 0.3
+        - (Op.Prog * 130.0 + Op.Cities * 2.5 + Op.Tech * 1.5 + Op.Mil * 0.3);
+      if Op.Prog >= 0.8 and then Me.Prog < Op.Prog then
+         V := V - 150.0;
+      end if;
+      if Me.Cities <= 0.0 then
+         V := V - 500.0;
+      end if;
+      return V;
+   end Abs_Eval;
+
+   function Mini (Me, Op : Abs_Rec; Depth : Natural; Max_Turn : Boolean;
+                  Alpha, Beta : Long_Float) return Long_Float;
+   function Mini_Plan (Me, Op : Abs_Rec) return Integer;
+
+   function Mini (Me, Op : Abs_Rec; Depth : Natural; Max_Turn : Boolean;
+                  Alpha, Beta : Long_Float) return Long_Float
+   is
+      Best : Long_Float;
+      A : Long_Float := Alpha;
+      B : Long_Float := Beta;
+      NM, NO : Abs_Rec;
+      V : Long_Float;
+   begin
+      if Depth = 0 then
+         return Abs_Eval (Me, Op);
+      end if;
+      Best := (if Max_Turn then -1.0e30 else 1.0e30);
+      for P in 0 .. 4 loop
+         NM := Me;
+         NO := Op;
+         if Max_Turn then
+            Abs_Apply (NM, NO, P);
+         else
+            Abs_Apply (NO, NM, P);
+         end if;
+         V := Mini (NM, NO, Depth - 1, not Max_Turn, A, B);
+         if Max_Turn then
+            if V > Best then
+               Best := V;
+            end if;
+            if V > A then
+               A := V;
+            end if;
+         else
+            if V < Best then
+               Best := V;
+            end if;
+            if V < B then
+               B := V;
+            end if;
+         end if;
+         exit when B <= A;
+      end loop;
+      return Best;
+   end Mini;
+
+   function Mini_Plan (Me, Op : Abs_Rec) return Integer is
+      Best_P : Integer := 0;
+      Best_V : Long_Float := -1.0e30;
+      A : Long_Float := -1.0e30;
+      B : constant Long_Float := 1.0e30;
+      NM, NO : Abs_Rec;
+      V : Long_Float;
+   begin
+      for P in 0 .. 4 loop
+         NM := Me;
+         NO := Op;
+         Abs_Apply (NM, NO, P);
+         V := Mini (NM, NO, 2, False, A, B);
+         if V > Best_V then
+            Best_V := V;
+            Best_P := P;
+         end if;
+         if V > A then
+            A := V;
+         end if;
+         exit when B <= A;
+      end loop;
+      return Best_P;
+   end Mini_Plan;
+
+   function Abs_Of (Fid : Integer) return Abs_Rec is
+      S : Abs_Rec;
+      N, Mi, En : Integer;
+   begin
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac = Fid then
+            City_Base (C, N, Mi, En);
+            S.Prod := S.Prod + Long_Float (Mi);
+            S.Labs := S.Labs + Long_Float (En);
+            S.Pop := S.Pop + Long_Float (Cities (C).Pop);
+            S.Cities := S.Cities + 1.0;
+         end if;
+      end loop;
+      S.Labs := S.Labs * Factions (Fid).Labs + 1.0;
+      S.Mil := Mil_Power (Fid);
+      S.Tech := Long_Float (Factions (Fid).Tech_N);
+      S.Prog := Victory_Progress (Fid);
+      S.Cr := Long_Float (Factions (Fid).Credits);
+      return S;
+   end Abs_Of;
+
+   procedure Plan_Faction (Fid : Integer) is
+      Opp, Plan, BI : Integer;
+      BV, V : Long_Float;
+      Me, Op : Abs_Rec;
+   begin
+      if Fid < 0 or else not Factions (Fid).Alive then
+         return;
+      end if;
+      Opp := -1;
+      BV := -1.0;
+      for R in 0 .. Fac_N - 1 loop
+         if R /= Fid and then Factions (R).Alive then
+            V := Victory_Progress (R) * 100.0 + Long_Float (Score_Of (R)) * 0.2;
+            if Opp < 0 or else V > BV then
+               BV := V;
+               Opp := R;
+            end if;
+         end if;
+      end loop;
+      if Opp < 0 then
+         return;
+      end if;
+      Me := Abs_Of (Fid);
+      Op := Abs_Of (Opp);
+      Plan := Mini_Plan (Me, Op);
+      if Turn_N < 25 and then Me.Cities < 4.0 and then Plan /= 4 then
+         Plan := 0;
+      end if;
+      if Plan = 4 and then Turn_N < Grace and then not Asc_On then
+         Plan := 2;
+      end if;
+      if Asc_On and then Asc_Fac /= Fid and then Me.Mil > 0.0 then
+         Plan := 4;
+      end if;
+      if Plan = 4 and then not At_War (Fid, Opp) then
+         if Wants_Break (Fid, Opp) then
+            declare
+               Why : constant String := Declare_War (Fid, Opp);
+            begin
+               if Why /= "" then
+                  Log ("T" & Img (Turn_N) & " strike not opened");
+               end if;
+            end;
+         else
+            BI := -1;
+            BV := -1.0;
+            for R in 0 .. Fac_N - 1 loop
+               if R /= Fid and then Factions (R).Alive and then At_War (Fid, R) then
+                  V := Victory_Progress (R) * 100.0 + Long_Float (Score_Of (R)) * 0.2;
+                  if BI < 0 or else V > BV then
+                     BV := V;
+                     BI := R;
+                  end if;
+               end if;
+            end loop;
+            if BI >= 0 then
+               Opp := BI;
+            else
+               Plan := 2;
+            end if;
+         end if;
+      end if;
+      if Plan = 4 then
+         War_Target (Fid) := Opp;
+         War_City (Fid) := -1;
+         if Asc_On and then Asc_Fac = Opp then
+            War_City (Fid) := -1;
+            for C in 0 .. City_N - 1 loop
+               if Cities (C).Id = Asc_City then
+                  War_City (Fid) := Cities (C).Loc;
+               end if;
+            end loop;
+         end if;
+      else
+         War_Target (Fid) := -1;
+         War_City (Fid) := -1;
+      end if;
+      Factions (Fid).Plan := Plan;
+   end Plan_Faction;
 
    function Mil_Power (Fid : Integer) return Long_Float is
       M : Long_Float := 0.0;
@@ -3408,6 +4186,27 @@ package body Colony is
       return M;
    end Mil_Power;
 
+   function Known_Owner (Fid, Cidx : Integer) return Integer is
+   begin
+      if Cidx < 0 or else Cidx >= City_N then
+         return -1;
+      end if;
+      if Cities (Cidx).Fac = Fid then
+         return Fid;
+      end if;
+      if Fid < 0 or else (Fid < Fac_N and then Factions (Fid).Vis (Cities (Cidx).Loc)) then
+         return Cities (Cidx).Fac;
+      end if;
+      if Fid in 0 .. 3 then
+         for I in CMem'Range (2) loop
+            if CMem (Fid, I).Live and then CMem (Fid, I).Id = Cities (Cidx).Id then
+               return CMem (Fid, I).Fac;
+            end if;
+         end loop;
+      end if;
+      return -1;
+   end Known_Owner;
+
    function Known_Mil (A, B : Integer) return Long_Float is
       M : Long_Float := 0.0;
    begin
@@ -3417,6 +4216,35 @@ package body Colony is
          then
             M := M + Long_Float (U_Atk (Units (U).Kind) + U_Def (Units (U).Kind))
               * Long_Float (Units (U).HP) / 10.0;
+         end if;
+      end loop;
+      if A in 0 .. 3 then
+         for I in Ghosts'Range (2) loop
+            if Ghosts (A, I).Live and then Ghosts (A, I).Fac = B then
+               declare
+                  K : constant Unit_Kind := Unit_Kind'Val (Ghosts (A, I).Kind);
+                  Fresh : Boolean := False;
+               begin
+                  if not U_Civ (K) then
+                     for U in 0 .. Unit_N - 1 loop
+                        if Units (U).Id = Ghosts (A, I).Id and then Units (U).Fac = B
+                          and then not U_Civ (Units (U).Kind)
+                          and then Factions (A).Vis (Units (U).Loc)
+                        then
+                           Fresh := True;
+                        end if;
+                     end loop;
+                     if not Fresh then
+                        M := M + Long_Float (U_Atk (K) + U_Def (K)) * 0.9;
+                     end if;
+                  end if;
+               end;
+            end if;
+         end loop;
+      end if;
+      for C in 0 .. City_N - 1 loop
+         if Cities (C).Fac /= A and then Known_Owner (A, C) = B then
+            M := M + 3.0;
          end if;
       end loop;
       return M;
@@ -3571,7 +4399,7 @@ package body Colony is
             if Rep < 20 and then not Losing then
                return False;
             end if;
-            if Pers = 1 and then SR > 1.8 and then Factions (Me).Plan = 2 then
+            if Pers = 1 and then SR > 1.8 and then Me in 0 .. 3 and then War_Target (Me) = Other then
                return False;
             end if;
             if Pers = 3 and then SR > 1.5 then
@@ -3788,7 +4616,7 @@ package body Colony is
               and then Victory_Progress (J) <= 0.6
             then
                if Pers = 2
-                 or else Pers = 1
+                 or else (Pers = 1 and then not (Strength_Of (Fid, J) > 1.8 and then War_Target (Fid) = J))
                  or else (Pers = 3 and then Strength_Of (Fid, J) < 1.3)
                  or else (Pers = 0 and then Strength_Of (Fid, J) < 0.7)
                then
@@ -5163,6 +5991,14 @@ package body Colony is
       Rep_V := (others => 50);
       Lock_Until := (others => 0);
       Fung_Cut := (others => 0);
+      War_Target := (others => -1);
+      War_City := (others => -1);
+      Land_Share := (others => 0.0);
+      Dip_Turns := (others => 0);
+      Coop_Turns := 0;
+      Coop_Key := 0;
+      Ghosts := (others => (others => <>));
+      CMem := (others => (others => <>));
       Contracts := (others => <>);
       Pending := (others => <>);
       Next_Offer := 1;
@@ -5876,6 +6712,9 @@ package body Colony is
       Collapsed : Integer := 0;
       Flooded : Integer := 0;
       Dig, Far, Aflood, Ally, Ob, Tlo, Thi, Surr, Leftu : Integer := -1;
+      Rest_Code, Ghost_C, Wt, Wt2, Rush_Ok, Rjob, Rleft : Integer := -1;
+      Aboard, Carried, Landed, Loaded, Dwin, Dtype, Cwin, Ctype : Integer := -1;
+      Plans : String (1 .. 7) := "0,0,0,0";
    begin
       if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) /= 0 then
          Code := 1;
@@ -6201,6 +7040,258 @@ package body Colony is
          end if;
       end if;
 
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Rest_Code := 0;
+         for F in 0 .. Fac_N - 1 loop
+            Plan_Faction (F);
+            Plans (F * 2 + 1) := Character'Val (Character'Pos ('0') + Factions (F).Plan);
+         end loop;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         declare
+            A, B, Best, Foe, Spot : Integer;
+         begin
+            A := -1;
+            B := -1;
+            Best := 0;
+            for I in 0 .. NTiles - 1 loop
+               if Tiles (I).Land then
+                  for J in 0 .. NTiles - 1 loop
+                     if Tiles (J).Land and then Dist (I, J) > Best and then Dist (I, J) < 20 then
+                        Best := Dist (I, J);
+                        A := I;
+                        B := J;
+                     end if;
+                  end loop;
+               end if;
+            end loop;
+            for V in 0 .. Unit_N - 1 loop
+               if Units (V).Fac = 0 then
+                  Units (V).Loc := A;
+               end if;
+            end loop;
+            declare
+               Nb : Nbr_Arr;
+               NN : Natural;
+            begin
+               Nbrs (A, 1, NN, Nb);
+               Spot := Nb (0);
+               for K in 0 .. NN - 1 loop
+                  if Tiles (Nb (K)).Land then
+                     Spot := Nb (K);
+                     exit;
+                  end if;
+               end loop;
+            end;
+            Foe := Make_Unit (1, Trooper, Spot);
+            Update_Seen (0);
+            for V in 0 .. Unit_N - 1 loop
+               if Units (V).Fac = 0 then
+                  Units (V).Loc := B;
+               end if;
+            end loop;
+            Units (Foe).Loc := A;
+            Update_Seen (0);
+            Ghost_C := JS_Round (Known_Mil (0, 1) * 100.0);
+         end;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Contact (0, 1) := True;
+         Contact (1, 0) := True;
+         Factions (0).AI := True;
+         Factions (1).AI := True;
+         if Make_Unit (1, Striker, Factions (1).Start) >= 0 then
+            War_Target (1) := 0;
+            if Propose (0, 1, 0) then
+               Wt := (if Rel (0, 1) = Rel_War then 0 else 1);
+            end if;
+            War_Target (1) := -1;
+            if Propose (0, 1, 0) then
+               Wt2 := Rel_Code (0, 1);
+            end if;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         declare
+            Anchor, Mid, City_At_I, Bur, Founder : Integer;
+            Found_It : Boolean := False;
+            Nb, Nb2 : Nbr_Arr;
+            NN, NN2 : Natural;
+         begin
+            Anchor := -1;
+            Mid := -1;
+            City_At_I := -1;
+            Search :
+            for I in 0 .. NTiles - 1 loop
+               if Tiles (I).Land and then X_Of (I) >= 3 and then Y_Of (I) >= 3 then
+                  Nbrs (I, 1, NN, Nb);
+                  for K in 0 .. NN - 1 loop
+                     if Tiles (Nb (K)).Land then
+                        Nbrs (Nb (K), 1, NN2, Nb2);
+                        for P in 0 .. NN2 - 1 loop
+                           if Nb2 (P) /= I and then Tiles (Nb2 (P)).Land
+                             and then Dist (I, Nb2 (P)) = 2 and then City_At (Nb2 (P)) < 0
+                           then
+                              Anchor := I;
+                              Mid := Nb (K);
+                              City_At_I := Nb2 (P);
+                              Found_It := True;
+                              exit Search;
+                           end if;
+                        end loop;
+                     end if;
+                  end loop;
+               end if;
+            end loop Search;
+            if Found_It and then Mid >= 0 then
+               Tiles (Anchor).Tun := 0;
+               Bur := Make_Unit (0, Burrower, Anchor);
+               Founder := Make_Unit (1, Colonist, City_At_I);
+               if Bur >= 0 and then Founder >= 0 and then Found_City (Founder) then
+                  Update_Seen (0);
+                  War_Target (0) := 1;
+                  if AI_Rush (Bur) then
+                     Rush_Ok := 1;
+                  else
+                     Rush_Ok := 0;
+                  end if;
+                  Rjob := Units (Bur).Target;
+                  Rleft := (if Units (Bur).Work = W_None then -1 else Units (Bur).Work_Left);
+               else
+                  Rest_Code := 3;
+               end if;
+            else
+               Rest_Code := 3;
+            end if;
+         end;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15) = 0 then
+         Site := Coastal_Land;
+         Sea := First_Sea (Site);
+         Ship := Make_Unit (0, Transport, Sea);
+         U := Make_Unit (0, Colonist, Site);
+         if Ship >= 0 and then U >= 0 and then Act (Act_Move, Units (U).Id, Sea) = 0
+           and then Units (U).On_Ship = Units (Ship).Id
+         then
+            Aboard := 1;
+            declare
+               Nb : Nbr_Arr;
+               NN : Natural;
+               Next, Shore : Integer;
+            begin
+               Nbrs (Sea, 1, NN, Nb);
+               Next := -1;
+               for K in 0 .. NN - 1 loop
+                  if not Tiles (Nb (K)).Land then
+                     declare
+                        Nb2 : Nbr_Arr;
+                        NN2 : Natural;
+                        Has_Land : Boolean := False;
+                     begin
+                        Nbrs (Nb (K), 1, NN2, Nb2);
+                        for P in 0 .. NN2 - 1 loop
+                           if Tiles (Nb2 (P)).Land then
+                              Has_Land := True;
+                           end if;
+                        end loop;
+                        if Has_Land and then Next < 0 then
+                           Next := Nb (K);
+                        end if;
+                     end;
+                  end if;
+               end loop;
+               if Next < 0 or else Act (Act_Move, Units (Ship).Id, Next) /= 0
+                 or else Units (U).Loc /= Units (Ship).Loc
+               then
+                  Carried := 0;
+               else
+                  Carried := 1;
+                  Nbrs (Units (Ship).Loc, 1, NN, Nb);
+                  Shore := -1;
+                  for K in 0 .. NN - 1 loop
+                     if Tiles (Nb (K)).Land then
+                        Shore := Nb (K);
+                        exit;
+                     end if;
+                  end loop;
+                  Units (U).MP := U_Mv (Colonist) * 3;
+                  if Shore >= 0 and then Act (Act_Move, Units (U).Id, Shore) = 0
+                    and then Units (U).On_Ship < 0 and then Units (U).MP = 0
+                    and then Tiles (Units (U).Loc).Land
+                  then
+                     Landed := 1;
+                  else
+                     Landed := 0;
+                  end if;
+               end if;
+            end;
+         else
+            Aboard := 0;
+            Carried := 0;
+            Landed := 0;
+         end if;
+         Site := Coastal_Land;
+         Ship := Make_Unit (0, Transport, Site);
+         U := Make_Unit (0, Colonist, Site);
+         if Ship >= 0 and then U >= 0 then
+            Units (U).Want_Ship := True;
+            Load_Waiters (Ship);
+            Loaded := (if Units (U).On_Ship = Units (Ship).Id then 1 else 0);
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15 + 256) = 0 then
+         Turn_N := 120;
+         U := -1;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = 0 and then Units (V).Kind = Colonist then
+               U := V;
+               exit;
+            end if;
+         end loop;
+         if U >= 0 and then Found_City (U) then
+            Set_Rel (0, 1, Rel_Peace);
+            Set_Rel (0, 2, Rel_Peace);
+            Since (0, 1) := 100;
+            Since (1, 0) := 100;
+            Since (0, 2) := 100;
+            Since (2, 0) := 100;
+            Rep_V (0) := 60;
+            for K in 1 .. 15 loop
+               Score_Diplomacy;
+            end loop;
+            Dwin := Winner;
+            Dtype := (if Win_Type = 7 then 7 else 0);
+         else
+            Rest_Code := 5;
+         end if;
+      end if;
+      if New_Game (7919, 36, 24, 0, 3, 0, 2, 15 + 512) = 0 then
+         Turn_N := 120;
+         Factions (2).Alive := False;
+         Factions (3).Alive := False;
+         U := -1;
+         for V in 0 .. Unit_N - 1 loop
+            if Units (V).Fac = 0 and then Units (V).Kind = Colonist then
+               U := V;
+               exit;
+            end if;
+         end loop;
+         if U >= 0 and then Found_City (U) then
+            Set_Rel (0, 1, Rel_Ally);
+            Since (0, 1) := Turn_N - 10;
+            Since (1, 0) := Turn_N - 10;
+            Land_Share (0) := 0.4;
+            Land_Share (1) := 0.3;
+            for K in 1 .. 15 loop
+               Score_Diplomacy;
+            end loop;
+            Cwin := Winner;
+            Ctype := (if Win_Type = 8 then 8 else 0);
+         else
+            Rest_Code := 6;
+         end if;
+      end if;
+
       RLen := 0;
       Add_R ("MECH ");
       Add_R (if Code = 0 then "status=pass" else "status=fail");
@@ -6234,6 +7325,28 @@ package body Colony is
       Add_R (" ob="); Add_R (Img (Ob));
       Add_R (" tlo="); Add_R (Img (Tlo));
       Add_R (" thi="); Add_R (Img (Thi));
+      Add_R (String'(1 => ASCII.LF));
+      Add_R ("REST ");
+      Add_R (if Rest_Code = 0 then "status=pass" else "status=fail");
+      Add_R (" code="); Add_R (Img (Rest_Code));
+      Add_R (" plans="); Add_R (Plans);
+      Add_R (" ghost="); Add_R (Img (Ghost_C));
+      Add_R (" wt="); Add_R (Img (Wt));
+      Add_R (" wt2="); Add_R (Img (Wt2));
+      Add_R (" rush="); Add_R (Img (Rush_Ok));
+      Add_R (" rjob="); Add_R (Img (Rjob));
+      Add_R (" rleft="); Add_R (Img (Rleft));
+      Add_R (" aboard="); Add_R (Img (Aboard));
+      Add_R (" carried="); Add_R (Img (Carried));
+      Add_R (" landed="); Add_R (Img (Landed));
+      Add_R (" loaded="); Add_R (Img (Loaded));
+      Add_R (" dwin="); Add_R (Img (Dwin));
+      Add_R (" dtype="); Add_R (Img (Dtype));
+      Add_R (" cwin="); Add_R (Img (Cwin));
+      Add_R (" ctype="); Add_R (Img (Ctype));
+      if Code = 0 then
+         return Rest_Code;
+      end if;
       return Code;
    end Run_Mechanics_Check;
 
@@ -6330,6 +7443,8 @@ package body Colony is
                when 4 => Copy_Text ("dominion");
                when 5 => Copy_Text ("score");
                when 6 => Copy_Text ("extinction");
+               when 7 => Copy_Text ("diplomatic");
+               when 8 => Copy_Text ("cooperative");
                when others => Copy_Text ("");
             end case;
          when 13 => Copy_Text (Tech_Blurb (A));
